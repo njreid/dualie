@@ -1,0 +1,22 @@
+# Firmware build
+build/
+.idea/
+
+# Rust / Cargo (workspace-level target dir)
+target/
+daemon/target/
+proto/target/
+hub/target/
+tui/target/
+
+# Node / web
+web/node_modules/
+web/dist/
+web/.svelte-kit/
+
+# Claude Code session logs
+.remember/
+
+# Case design files (too large for VCS)
+case/*.f3d
+case/*.step

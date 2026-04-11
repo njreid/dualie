@@ -1,0 +1,22 @@
+[package]
+name        = "dualie-hub"
+version     = "0.1.0"
+edition     = "2021"
+description = "Dualie Pi Zero 2W hub — owns config, routes KVM, syncs files/clipboard"
+license     = "GPL-3.0"
+
+[[bin]]
+name = "dualie-hub"
+path = "src/main.rs"
+
+[dependencies]
+dualie-proto = { path = "../proto" }
+
+tokio             = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+ciborium          = { workspace = true }
+anyhow            = { workspace = true }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }

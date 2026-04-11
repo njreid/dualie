@@ -1,0 +1,17 @@
+[workspace]
+members  = ["daemon", "proto", "hub"]
+resolver = "2"
+
+[workspace.dependencies]
+# Async
+tokio        = { version = "1",   features = ["full"] }
+# Serialisation
+serde        = { version = "1",   features = ["derive"] }
+serde_json   = { version = "1" }
+ciborium     = { version = "0.2" }
+# Error handling
+anyhow       = { version = "1" }
+thiserror    = { version = "1" }
+# Logging
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

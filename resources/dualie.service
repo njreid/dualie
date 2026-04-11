@@ -1,0 +1,19 @@
+[Unit]
+Description=Dualie KVM daemon – config UI and virtual key dispatch
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dualie
+Restart=on-failure
+RestartSec=5
+
+# Environment for XDG app discovery
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

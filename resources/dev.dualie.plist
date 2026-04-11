@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: @DUALIE_BIN@ is replaced by `just install` with the real path -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.dualie</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@DUALIE_BIN@</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/dualie.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/dualie.err</string>
+
+  <!-- Accessibility permission required: add the binary to
+       System Settings → Privacy & Security → Accessibility. -->
+</dict>
+</plist>

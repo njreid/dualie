@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Build the SPA and embed it in the daemon before compiling ─────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14         # Apple Silicon runner
+            target: aarch64-apple-darwin
+          - os: macos-13         # Intel runner
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build SPA
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux cross)
+        if: contains(matrix.target, 'linux')
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y musl-tools
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('daemon/Cargo.lock') }}
+
+      - name: Build daemon
+        run: |
+          cargo build --manifest-path daemon/Cargo.toml \
+            --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="dualie-${VERSION}-${{ matrix.target }}.tar.gz"
+          cp "daemon/target/${{ matrix.target }}/release/dualie" dualie
+          tar -czf "$ARCHIVE" dualie
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
+          shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
+  # ── Create GitHub release and update Homebrew tap ─────────────────────────
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.tar.gz
+          generate_release_notes: true
+
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Collect SHA256s
+          sha_aarch64_darwin=$(cat dist/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
+          sha_x86_64_darwin=$(cat  dist/x86_64-apple-darwin/*.sha256  | awk '{print $1}')
+          sha_x86_64_linux=$(cat   dist/x86_64-unknown-linux-musl/*.sha256  | awk '{print $1}')
+          sha_aarch64_linux=$(cat  dist/aarch64-unknown-linux-musl/*.sha256 | awk '{print $1}')
+
+          # Clone tap repo, patch formula, push
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/dualie-dev/homebrew-dualie.git" tap
+          cd tap
+
+          FORMULA="Formula/dualie.rb"
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
+
+          # Replace each placeholder SHA in order of appearance
+          python3 - "$FORMULA" \
+            "$sha_aarch64_darwin" "$sha_x86_64_darwin" \
+            "$sha_x86_64_linux"  "$sha_aarch64_linux" <<'EOF'
+          import sys, re
+          path, *shas = sys.argv
+          content = open(path).read()
+          for sha in shas:
+              content = content.replace(
+                  '"0000000000000000000000000000000000000000000000000000000000000000"',
+                  f'"{sha}"', 1)
+          open(path, 'w').write(content)
+          EOF
+
+          git config user.email "ci@dualie.dev"
+          git config user.name  "Dualie CI"
+          git add "$FORMULA"
+          git commit -m "dualie ${VERSION}"
+          git push
