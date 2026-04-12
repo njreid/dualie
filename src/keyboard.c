@@ -391,8 +391,11 @@ bool process_caps_layer(hid_keyboard_report_t *report, device_t *state) {
                     chord_applied = true;
                 }
             } else if (e->entry_type == CAPS_ENTRY_VIRTUAL) {
-                uint8_t vk = dualie_vkey(e->vaction_idx);
-                if (vk) report->keycode[j] = vk;
+                /* Send VirtualAction { slot } over CDC-ACM serial.
+                 * The daemon receives it on /dev/ttyACM* and dispatches the
+                 * configured action.  No F13–F24 HID keycode is emitted. */
+                serial_send_virtual_action(e->vaction_idx);
+                return true; /* consume keypress — don't forward HID event */
             } else if (e->entry_type == CAPS_ENTRY_JUMP_A) {
                 set_active_output(state, 0);
                 return true; // consume keypress, don't forward

@@ -88,26 +88,19 @@
  *  Settings for the CDC (Communication Device Class) for serial communication.
  *==============================================================================*/
 
-#ifdef DH_DEBUG
-
-// Enable CDC class for debugging over serial.
+// CDC-ACM is always enabled — it is the daemon control channel, not just debug.
+// The daemon opens /dev/ttyACM* (Linux) or /dev/tty.usbmodem* (macOS) exclusively
+// to exchange DualieMessage COBS-framed CBOR frames.
 #define CFG_TUD_CDC           1
 
-// Use a custom debug printf function.
+// Buffer sizes for CDC RX and TX (64 = USB FS max packet size).
+#define CFG_TUD_CDC_RX_BUFSIZE 256
+#define CFG_TUD_CDC_TX_BUFSIZE 256
+
+#ifdef DH_DEBUG
+// Additional debug printf hook (only active with DH_DEBUG).
 #define CFG_TUSB_DEBUG_PRINTF dh_debug_printf
 extern int dh_debug_printf(const char *__restrict __format, ...);
-
-// Buffer sizes for CDC RX and TX.
-#define CFG_TUD_CDC_RX_BUFSIZE 64
-#define CFG_TUD_CDC_TX_BUFSIZE 64
-
-// Line coding settings to use on CDC enumeration.
-#define CFG_TUH_CDC_LINE_CODING_ON_ENUM \
-    { 921600, CDC_LINE_CONDING_STOP_BITS_1, CDC_LINE_CONDING_PARITY_NONE, 8 }
-
-#else
-// Disable CDC class when not debugging.
-#define CFG_TUD_CDC 0
 #endif
 
 /*==============================================================================

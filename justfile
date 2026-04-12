@@ -1,8 +1,8 @@
 # Dualie – justfile
 # Usage: just <recipe>
-# Install just: brew install just
+# Install just: cargo install just  OR  brew install just
 #
-# Top-level recipes delegate to firmware/, daemon/, and web/ sub-projects.
+# Recipes are grouped: firmware → daemon → combined.
 
 default:
     @just --list
@@ -11,110 +11,108 @@ default:
 
 # Configure the firmware build (run once, or after CMakeLists changes)
 firmware-configure:
-    cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Release
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 # Build the firmware .uf2
 firmware-build: firmware-configure
-    cmake --build firmware/build --parallel
+    cmake --build build --parallel
 
 # Build firmware unit tests (runs on host, no Pico required)
 firmware-test:
-    cmake -S firmware -B firmware/build-test -DDUALIE_HOST_TESTS=ON
-    cmake --build firmware/build-test --parallel
-    firmware/build-test/dualie_tests
-
-# Flash firmware to a connected Pico (copies .uf2 to the mounted drive)
-firmware-flash DRIVE="/Volumes/RPI-RP2":
-    cp firmware/build/dualie.uf2 {{DRIVE}}/
+    cmake -S . -B build-test -DDUALIE_HOST_TESTS=ON
+    cmake --build build-test --parallel
+    build-test/dualie_tests
 
 # Clean firmware build artefacts
 firmware-clean:
-    rm -rf firmware/build firmware/build-test
+    rm -rf build build-test
+
+# Flash firmware to both boards from Machine A.
+#
+# Steps:
+#   1. Build firmware
+#   2. Send RebootToBootloader over CDC-ACM → RP2040-A enters USB MSC mode
+#   3. Wait for the RPI-RP2 drive to appear
+#   4. Copy the .uf2 — RP2040-A flashes itself, then auto-flashes RP2040-B
+#      over the inter-board UART (DeskHop cross-board upgrade mechanism)
+#
+# Override the serial device with: just flash SERIAL=/dev/ttyACM1
+SERIAL := ""
+flash: firmware-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    SERIAL_FLAG=""
+    if [ -n "{{SERIAL}}" ]; then
+        SERIAL_FLAG="--serial {{SERIAL}}"
+    fi
+
+    echo "→ Sending RebootToBootloader to RP2040-A …"
+    cargo run -q --bin dualie -- $SERIAL_FLAG --serial-cmd reboot-to-bootloader
+
+    echo "→ Waiting for RPI-RP2 bootloader drive …"
+    for i in $(seq 1 40); do
+        if [ -b /dev/disk/by-label/RPI-RP2 ] 2>/dev/null; then
+            DRIVE=$(readlink -f /dev/disk/by-label/RPI-RP2)
+            MOUNT=$(findmnt -n -o TARGET --source "$DRIVE" 2>/dev/null || true)
+            if [ -z "$MOUNT" ]; then
+                MOUNT=$(udisksctl mount -b "$DRIVE" --no-user-interaction 2>&1 | grep -oP 'at \K\S+')
+            fi
+            break
+        fi
+        if [ -d /run/media/$USER/RPI-RP2 ]; then
+            MOUNT=/run/media/$USER/RPI-RP2
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ -z "${MOUNT:-}" ]; then
+        echo "ERROR: RPI-RP2 drive did not appear after 20s" >&2
+        exit 1
+    fi
+
+    echo "→ Flashing dualie_board_A.uf2 to $MOUNT …"
+    cp build/dualie_board_A.uf2 "$MOUNT/"
+    sync
+
+    echo "✓ RP2040-A flashed. It will now auto-flash RP2040-B over UART."
+    echo "  Both boards reboot automatically when done."
 
 # ── Daemon ────────────────────────────────────────────────────────────────────
 
 # Build the daemon binary
 daemon-build:
-    cargo build --manifest-path daemon/Cargo.toml --release
+    cargo build --release -p dualie
 
-# Run the daemon in development mode (recompiles on source changes)
-daemon-dev:
-    cd daemon && cargo watch -x 'run -- --dev'
+# Run the daemon
+daemon-run:
+    cargo run -p dualie
 
 # Run daemon tests
 daemon-test:
-    cargo test --manifest-path daemon/Cargo.toml
+    cargo test --workspace
 
 # Clean daemon build artefacts
 daemon-clean:
-    cargo clean --manifest-path daemon/Cargo.toml
-
-# ── Web SPA ───────────────────────────────────────────────────────────────────
-
-# Install web dependencies
-web-install:
-    cd web && npm install
-
-# Start the Vite dev server (proxies /api to daemon on 7474)
-web-dev: web-install
-    cd web && npm run dev
-
-# Build the SPA bundle (output goes to daemon/src/web/static for embedding)
-web-build: web-install
-    cd web && npm run build
-
-# Clean web build artefacts
-web-clean:
-    rm -rf web/node_modules daemon/src/web/static/assets
-    # Restore the placeholder index.html so `cargo check` still works
-    echo '<!doctype html><html><head><meta charset="utf-8"><title>Dualie</title></head><body><div id="app"></div></body></html>' \
-        > daemon/src/web/static/index.html
+    cargo clean
 
 # ── Combined ──────────────────────────────────────────────────────────────────
 
-# Build everything (firmware + daemon + web)
-build: web-build daemon-build firmware-build
+# Build everything (firmware + daemon)
+build: firmware-build daemon-build
 
 # Run all tests
 test: firmware-test daemon-test
 
-# Start daemon (with file-watch recompile) + Vite dev server concurrently.
-# Requires: cargo install cargo-watch
-dev:
-    #!/usr/bin/env bash
-    set -e
-    if ! command -v cargo-watch &>/dev/null; then
-        echo "cargo-watch not found — install it first:"
-        echo "  cargo install cargo-watch"
-        exit 1
-    fi
-    # Ensure web deps are present before forking
-    cd web && npm install --silent && cd ..
-
-    echo "Starting daemon (cargo watch) on :7474 …"
-    cd daemon && cargo watch -x 'run -- --dev' &
-    DAEMON_PID=$!
-    cd ..
-
-    echo "Starting Vite dev server on :5173 …"
-    cd web && npm run dev &
-    WEB_PID=$!
-    cd ..
-
-    trap "echo 'Shutting down…'; kill $DAEMON_PID $WEB_PID 2>/dev/null; wait" EXIT INT TERM
-    wait $DAEMON_PID $WEB_PID
-
-# Clean everything
-clean: firmware-clean daemon-clean web-clean
-
-# ── Install / uninstall (non-brew) ────────────────────────────────────────────
+# ── Install / uninstall ───────────────────────────────────────────────────────
 
 # Install daemon binary to ~/.local/bin and register the user service
 install: daemon-build
     #!/usr/bin/env bash
     set -e
     DUALIE_BIN="${HOME}/.local/bin/dualie"
-    install -Dm755 daemon/target/release/dualie "${DUALIE_BIN}"
+    install -Dm755 target/release/dualie "${DUALIE_BIN}"
     if [[ "$(uname)" == "Darwin" ]]; then
         PLIST_DEST="${HOME}/Library/LaunchAgents/dev.dualie.plist"
         mkdir -p "${HOME}/Library/LaunchAgents"
@@ -124,6 +122,12 @@ install: daemon-build
         echo "Installed and loaded launchd service."
         echo "  → Add ${DUALIE_BIN} to System Settings → Privacy & Security → Accessibility"
     else
+        # Add user to input group if not already a member (for evdev access)
+        if ! groups | grep -q '\binput\b'; then
+            echo "  → Adding $(whoami) to the 'input' group (evdev access for local remap)"
+            sudo usermod -aG input "$(whoami)"
+            echo "  → Log out and back in for group membership to take effect"
+        fi
         mkdir -p "${HOME}/.config/systemd/user"
         cp resources/dualie.service "${HOME}/.config/systemd/user/"
         systemctl --user daemon-reload

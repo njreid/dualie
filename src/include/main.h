@@ -42,6 +42,7 @@
 #include "pinout.h"
 #include "screen.h"
 #include "serial.h"
+#include "serial_chan.h"
 #include "setup.h"
 #include "tasks.h"
 #include "watchdog.h"

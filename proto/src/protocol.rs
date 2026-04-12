@@ -51,6 +51,15 @@ pub enum DualieMessage {
     Ping,
     Pong,
 
+    // ── Firmware version ─────────────────────────────────────────────────────
+
+    /// RP2040 → Daemon: sent once when the daemon raises DTR on the serial port.
+    /// The daemon compares `version` against `FIRMWARE_MIN_COMPATIBLE` and
+    /// logs a warning (or prompts to run `just flash`) if the firmware is older.
+    FirmwareInfo {
+        version: u32,
+    },
+
     // ── KVM switching ────────────────────────────────────────────────────────
 
     /// RP2040 → Daemon: a caps-layer virtual action was triggered.

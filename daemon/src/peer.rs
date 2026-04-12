@@ -17,6 +17,11 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
+/// Minimum firmware version the daemon considers compatible.
+/// If the RP2040 reports a lower version, the daemon logs a warning and
+/// suggests running `just flash` to upgrade.
+pub const FIRMWARE_MIN_COMPATIBLE: u32 = 1;
+
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const TX_QUEUE: usize = 64;
 
@@ -63,6 +68,17 @@ async fn tx_task(mut writer: SerialPeerWriter, mut rx: mpsc::Receiver<DualieMess
 async fn dispatch(msg: DualieMessage) {
     match msg {
         DualieMessage::Ping => {}
+
+        DualieMessage::FirmwareInfo { version } => {
+            info!(version, "RP2040 firmware version");
+            if version < FIRMWARE_MIN_COMPATIBLE {
+                warn!(
+                    version,
+                    min = FIRMWARE_MIN_COMPATIBLE,
+                    "RP2040 firmware is outdated — run `just flash` to upgrade"
+                );
+            }
+        }
 
         DualieMessage::VirtualAction { slot } => {
             info!(slot, "virtual action from RP2040");

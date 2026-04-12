@@ -89,16 +89,14 @@ bool tud_mouse_report(uint8_t mode, uint8_t buttons, int16_t x, int16_t y, int8_
 
 // array of pointer to string descriptors
 char const *string_desc_arr[] = {
-    (const char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
+    (const char[]){0x09, 0x04}, // 0: supported language English (0x0409)
     "Hrvoje Cavrak",            // 1: Manufacturer
-    "DeskHop Switch",           // 2: Product
-    "0",                        // 3: Serials, should use chip ID
-    "DeskHop Helper",           // 4: Mouse Helper Interface
-    "DeskHop Config",           // 5: Vendor Interface
-    "DeskHop Disk",             // 6: Disk Interface
-#ifdef DH_DEBUG
-    "DeskHop Debug",            // 7: Debug Interface
-#endif
+    "Dualie Switch",            // 2: Product
+    "0",                        // 3: Serial (replaced with chip ID at runtime)
+    "Dualie Mouse Helper",      // 4: Relative-mouse HID interface
+    "Dualie Config",            // 5: Vendor/WebHID config interface
+    "Dualie Disk",              // 6: MSC disk interface
+    "Dualie Serial",            // 7: CDC-ACM daemon control channel
 };
 
 // String Descriptor Index
@@ -110,7 +108,7 @@ enum {
     STRID_MOUSE,
     STRID_VENDOR,
     STRID_DISK,
-    STRID_DEBUG,
+    STRID_CDC,
 };
 
 static uint16_t _desc_str[32];
@@ -170,33 +168,32 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 #define EPNUM_MSC_OUT    0x04
 #define EPNUM_MSC_IN     0x84
 
-#ifndef DH_DEBUG
-
-#define ITF_NUM_TOTAL 2
-#define ITF_NUM_TOTAL_CONFIG 4
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_HID_DESC_LEN)
-#define CONFIG_TOTAL_LEN_CFG (TUD_CONFIG_DESC_LEN + 3 * TUD_HID_DESC_LEN + TUD_MSC_DESC_LEN)
-
-#else
-#define ITF_NUM_CDC 4
-#define ITF_NUM_TOTAL 3
-#define ITF_NUM_TOTAL_CONFIG 5
-
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_HID_DESC_LEN + TUD_CDC_DESC_LEN)
-#define CONFIG_TOTAL_LEN_CFG (TUD_CONFIG_DESC_LEN + 3 * TUD_HID_DESC_LEN + TUD_MSC_DESC_LEN + TUD_CDC_DESC_LEN)
-
+/* CDC-ACM (daemon control channel) — always present in both configurations. */
 #define EPNUM_CDC_NOTIF  0x85
 #define EPNUM_CDC_OUT    0x06
 #define EPNUM_CDC_IN     0x86
 
-#endif
+/*
+ * CDC-ACM takes 2 interface slots (comm + data), so:
+ *   Normal mode:  HID(0) + HID_REL_M(1) + CDC(2+3)           → 4 interfaces
+ *   Config mode:  HID(0) + HID_REL_M(1) + CDC(2+3) +
+ *                 HID_VENDOR(4) + MSC(5)                      → 6 interfaces
+ */
+#define ITF_NUM_TOTAL        4
+#define ITF_NUM_TOTAL_CONFIG 6
+
+#define CONFIG_TOTAL_LEN \
+    (TUD_CONFIG_DESC_LEN + 2 * TUD_HID_DESC_LEN + TUD_CDC_DESC_LEN)
+
+#define CONFIG_TOTAL_LEN_CFG \
+    (TUD_CONFIG_DESC_LEN + 3 * TUD_HID_DESC_LEN + TUD_MSC_DESC_LEN + TUD_CDC_DESC_LEN)
 
 
 uint8_t const desc_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
 
-    // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
+    // Interface 0: HID (keyboard + mouse + consumer)
     TUD_HID_DESCRIPTOR(ITF_NUM_HID,
                        STRID_PRODUCT,
                        HID_ITF_PROTOCOL_NONE,
@@ -205,6 +202,7 @@ uint8_t const desc_configuration[] = {
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
 
+    // Interface 1: HID (relative mouse helper)
     TUD_HID_DESCRIPTOR(ITF_NUM_HID_REL_M,
                        STRID_MOUSE,
                        HID_ITF_PROTOCOL_NONE,
@@ -212,18 +210,18 @@ uint8_t const desc_configuration[] = {
                        EPNUM_HID_REL_M,
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
-#ifdef DH_DEBUG
-    // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-    TUD_CDC_DESCRIPTOR(
-        ITF_NUM_CDC, STRID_DEBUG, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
-#endif
+
+    // Interfaces 2+3: CDC-ACM daemon control channel
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC,
+                       EPNUM_CDC_NOTIF, 8,
+                       EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
 };
 
 uint8_t const desc_configuration_config[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL_CONFIG, 0, CONFIG_TOTAL_LEN_CFG, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
 
-    // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
+    // Interface 0: HID (keyboard + mouse + consumer)
     TUD_HID_DESCRIPTOR(ITF_NUM_HID,
                        STRID_PRODUCT,
                        HID_ITF_PROTOCOL_NONE,
@@ -232,6 +230,7 @@ uint8_t const desc_configuration_config[] = {
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
 
+    // Interface 1: HID (relative mouse helper)
     TUD_HID_DESCRIPTOR(ITF_NUM_HID_REL_M,
                        STRID_MOUSE,
                        HID_ITF_PROTOCOL_NONE,
@@ -240,6 +239,12 @@ uint8_t const desc_configuration_config[] = {
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
 
+    // Interfaces 2+3: CDC-ACM daemon control channel
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC,
+                       EPNUM_CDC_NOTIF, 8,
+                       EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
+
+    // Interface 4: HID vendor/WebHID config
     TUD_HID_DESCRIPTOR(ITF_NUM_HID_VENDOR,
                        STRID_VENDOR,
                        HID_ITF_PROTOCOL_NONE,
@@ -248,16 +253,12 @@ uint8_t const desc_configuration_config[] = {
                        CFG_TUD_HID_EP_BUFSIZE,
                        1),
 
+    // Interface 5: MSC disk
     TUD_MSC_DESCRIPTOR(ITF_NUM_MSC,
                        STRID_DISK,
                        EPNUM_MSC_OUT,
                        EPNUM_MSC_IN,
                        64),
-#ifdef DH_DEBUG
-    // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-    TUD_CDC_DESCRIPTOR(
-        ITF_NUM_CDC, STRID_DEBUG, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, CFG_TUD_CDC_EP_BUFSIZE),
-#endif
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {

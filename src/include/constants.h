@@ -24,8 +24,10 @@
 
 #define ITF_NUM_HID        0
 #define ITF_NUM_HID_REL_M  1
-#define ITF_NUM_HID_VENDOR 2
-#define ITF_NUM_MSC        3
+/* CDC-ACM occupies two interface numbers (comm + data). */
+#define ITF_NUM_CDC        2
+#define ITF_NUM_HID_VENDOR 4  /* shifted up by 2 — CDC comm+data = itf 2+3 */
+#define ITF_NUM_MSC        5  /* shifted up by 2 */
 
 /*==============================================================================
  *  Mouse Modes
