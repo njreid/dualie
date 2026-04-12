@@ -18,7 +18,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio_serial::SerialStream;
 use tracing::debug;
 
@@ -35,6 +35,45 @@ const BAUD_RATE: u32 = 115_200;
 
 /// `0x00` is the COBS frame delimiter.
 const FRAME_DELIM: u8 = 0x00;
+
+// ── Split halves ──────────────────────────────────────────────────────────────
+
+/// Write-only half of a `SerialPeer`.
+pub struct SerialPeerWriter(WriteHalf<SerialStream>);
+
+/// Read-only half of a `SerialPeer`.
+pub struct SerialPeerReader(ReadHalf<SerialStream>);
+
+impl SerialPeerWriter {
+    pub async fn send(&mut self, msg: &DualieMessage) -> Result<()> {
+        let mut cbor = Vec::new();
+        ciborium::into_writer(msg, &mut cbor).context("CBOR serialise")?;
+        let encoded = cobs::encode_vec(&cbor);
+        self.0.write_all(&encoded).await.context("serial write")?;
+        self.0.write_all(&[FRAME_DELIM]).await.context("serial write delimiter")?;
+        debug!(msg = ?msg, "serial → RP2040");
+        Ok(())
+    }
+}
+
+impl SerialPeerReader {
+    pub async fn recv(&mut self) -> Result<DualieMessage> {
+        let mut frame_bytes: Vec<u8> = Vec::with_capacity(64);
+        loop {
+            let b = self.0.read_u8().await.context("serial read")?;
+            if b == FRAME_DELIM {
+                break;
+            }
+            frame_bytes.push(b);
+        }
+        let cbor = cobs::decode_vec(&frame_bytes)
+            .map_err(|_| anyhow::anyhow!("COBS decode failed ({} bytes)", frame_bytes.len()))?;
+        let msg: DualieMessage = ciborium::from_reader(cbor.as_slice())
+            .context("CBOR deserialise")?;
+        debug!(msg = ?msg, "serial ← RP2040");
+        Ok(msg)
+    }
+}
 
 // ── SerialPeer ────────────────────────────────────────────────────────────────
 
@@ -68,51 +107,10 @@ impl SerialPeer {
         }
     }
 
-    // ── Send ──────────────────────────────────────────────────────────────────
-
-    /// Serialise `msg` to CBOR, COBS-encode it, and write to the device
-    /// followed by the `0x00` frame delimiter.
-    pub async fn send(&mut self, msg: &DualieMessage) -> Result<()> {
-        // Step 1: CBOR serialise.
-        let mut cbor = Vec::new();
-        ciborium::into_writer(msg, &mut cbor)
-            .context("CBOR serialise")?;
-
-        // Step 2: COBS encode (output never contains 0x00).
-        let encoded = cobs::encode_vec(&cbor);
-
-        // Step 3: Write encoded payload + delimiter.
-        self.stream.write_all(&encoded).await.context("serial write")?;
-        self.stream.write_all(&[FRAME_DELIM]).await.context("serial write delimiter")?;
-
-        debug!(msg = ?msg, "serial → RP2040");
-        Ok(())
-    }
-
-    // ── Recv ──────────────────────────────────────────────────────────────────
-
-    /// Read bytes until a `0x00` delimiter, COBS-decode, CBOR-deserialise.
-    pub async fn recv(&mut self) -> Result<DualieMessage> {
-        let mut frame_bytes: Vec<u8> = Vec::with_capacity(64);
-
-        loop {
-            let b = self.stream.read_u8().await.context("serial read")?;
-            if b == FRAME_DELIM {
-                break;
-            }
-            frame_bytes.push(b);
-        }
-
-        // Step 1: COBS decode.
-        let cbor = cobs::decode_vec(&frame_bytes)
-            .map_err(|_| anyhow::anyhow!("COBS decode failed ({} bytes)", frame_bytes.len()))?;
-
-        // Step 2: CBOR deserialise.
-        let msg: DualieMessage = ciborium::from_reader(cbor.as_slice())
-            .context("CBOR deserialise")?;
-
-        debug!(msg = ?msg, "serial ← RP2040");
-        Ok(msg)
+    /// Split into independent read/write halves for concurrent use in separate tasks.
+    pub fn into_split(self) -> (SerialPeerWriter, SerialPeerReader) {
+        let (rd, wr) = tokio::io::split(self.stream);
+        (SerialPeerWriter(wr), SerialPeerReader(rd))
     }
 }
 

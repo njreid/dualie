@@ -1,18 +1,17 @@
-/// peer.rs — serial peer client.
+/// peer.rs — CDC-ACM serial peer to the local RP2040.
 ///
-/// Runs as a background task that owns the CDC-ACM serial connection to the
-/// local RP2040.  Reconnects automatically when the device disappears or an
-/// error occurs.
+/// Runs as a background task that owns the serial connection.  Reconnects
+/// automatically when the device disappears or an error occurs.
 ///
 /// Responsibilities:
-///   1. Open the CDC-ACM device and keep it open.
-///   2. Dispatch inbound `DualieMessage` frames from the RP2040.
+///   1. Open the CDC-ACM device via `SerialPeer::open` (explicit path or
+///      auto-detected via `detect_path`).
+///   2. Split into read/write halves; run a TX task and an RX dispatch loop
+///      concurrently without any shared locking on the stream.
 ///   3. Expose a `SerialClient` handle so other modules can send messages.
-///
-/// On disconnect it waits `RECONNECT_DELAY` then retries indefinitely.
 
 use anyhow::Result;
-use dualie_proto::DualieMessage;
+use dualie_proto::{DualieMessage, SerialPeer, SerialPeerWriter};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, sleep};
@@ -48,16 +47,26 @@ impl SerialClient {
     }
 }
 
+// ── TX writer task ────────────────────────────────────────────────────────────
+
+async fn tx_task(mut writer: SerialPeerWriter, mut rx: mpsc::Receiver<DualieMessage>) {
+    while let Some(msg) = rx.recv().await {
+        if let Err(e) = writer.send(&msg).await {
+            info!("serial tx task ending: {e}");
+            break;
+        }
+    }
+}
+
 // ── Inbound dispatch ──────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 async fn dispatch(msg: DualieMessage) {
     match msg {
         DualieMessage::Ping => {}
 
         DualieMessage::VirtualAction { slot } => {
             info!(slot, "virtual action from RP2040");
-            // TODO: look up slot in config and execute action
+            // TODO (Phase 2+): look up slot in config and execute action
         }
 
         DualieMessage::ActiveOutput { output } => {
@@ -67,7 +76,7 @@ async fn dispatch(msg: DualieMessage) {
 
         DualieMessage::ClipboardPush(content) => {
             info!(len = content.text.len(), "clipboard received from RP2040");
-            // TODO: write to OS clipboard via arboard
+            // TODO (Phase 6): write to OS clipboard via arboard
         }
 
         DualieMessage::Error { message } => {
@@ -75,31 +84,29 @@ async fn dispatch(msg: DualieMessage) {
         }
 
         other => {
-            warn!("unhandled message: {:?}", other);
+            warn!("unhandled message from RP2040: {:?}", other);
         }
     }
 }
 
 // ── Single connection lifecycle ───────────────────────────────────────────────
 
-async fn run_once(
-    serial_path: &str,
-    _client:     &SerialClient,
-) -> Result<()> {
-    // TODO (Phase 1.2/1.3): replace with SerialPeer::open(serial_path).
-    // For now we just log that we would connect, keeping the reconnect loop
-    // structure in place so it compiles and runs.
-    info!(serial_path, "opening serial connection to RP2040");
-    anyhow::bail!("SerialPeer not yet implemented — implement in Phase 1.2");
-    // The code below will be restored once SerialPeer exists:
-    #[allow(unreachable_code)]
-    {
-        let (tx, _rx) = mpsc::channel::<DualieMessage>(TX_QUEUE);
-        _client.set_sender(Some(tx)).await;
-        loop {
-            // recv from peer → dispatch
-            sleep(Duration::from_secs(60)).await;
-        }
+async fn run_once(serial_path: &str, client: &SerialClient) -> Result<()> {
+    info!(serial_path, "opening CDC-ACM serial connection");
+
+    let peer = SerialPeer::open(std::path::Path::new(serial_path))?;
+    let (writer, mut reader) = peer.into_split();
+
+    // Arm the outbound channel so SerialClient::send works while connected.
+    let (tx, rx) = mpsc::channel::<DualieMessage>(TX_QUEUE);
+    client.set_sender(Some(tx)).await;
+
+    // TX runs in its own task; RX drives the current task.
+    tokio::spawn(tx_task(writer, rx));
+
+    loop {
+        let msg = reader.recv().await?;
+        dispatch(msg).await;
     }
 }
 
@@ -117,7 +124,7 @@ pub fn spawn(serial_path: String) -> SerialClient {
                 Err(e) => error!("serial connection error: {e:#}"),
             }
             client_bg.set_sender(None).await;
-            info!("reconnecting in {}s", RECONNECT_DELAY.as_secs());
+            info!("reconnecting in {}s …", RECONNECT_DELAY.as_secs());
             sleep(RECONNECT_DELAY).await;
         }
     });
