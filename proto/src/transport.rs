@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::future::Future;
-use crate::protocol::HubMessage;
+use crate::protocol::DualieMessage;
 
 // ── Framing constants ─────────────────────────────────────────────────────────
 
@@ -9,7 +9,7 @@ pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 
 // ── Transport trait ───────────────────────────────────────────────────────────
 
-/// Bidirectional, ordered, reliable channel of `HubMessage` values.
+/// Bidirectional, ordered, reliable channel of `DualieMessage` values.
 ///
 /// The blanket implementation for `TcpStream` (in `hub` and `daemon`) uses
 /// CBOR encoding with a 4-byte little-endian length prefix per frame.
@@ -17,14 +17,14 @@ pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Using explicit associated `Future` types (Rust ≥ 1.75 async-fn-in-trait)
 /// keeps this object-safe when boxed as `Box<dyn PeerTransport>`.
 pub trait PeerTransport: Send {
-    fn send(&mut self, msg: &HubMessage) -> impl Future<Output = Result<()>> + Send;
-    fn recv(&mut self)                   -> impl Future<Output = Result<HubMessage>> + Send;
+    fn send(&mut self, msg: &DualieMessage) -> impl Future<Output = Result<()>> + Send;
+    fn recv(&mut self)                   -> impl Future<Output = Result<DualieMessage>> + Send;
 }
 
 // ── Framing helpers (shared by hub and daemon implementations) ────────────────
 
-/// Encode a `HubMessage` as a length-prefixed CBOR frame.
-pub fn encode_frame(msg: &HubMessage) -> Result<Vec<u8>> {
+/// Encode a `DualieMessage` as a length-prefixed CBOR frame.
+pub fn encode_frame(msg: &DualieMessage) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     ciborium::into_writer(msg, &mut body)?;
 
@@ -40,8 +40,8 @@ pub fn encode_frame(msg: &HubMessage) -> Result<Vec<u8>> {
     Ok(frame)
 }
 
-/// Decode a `HubMessage` from the body bytes of one frame (no length prefix).
-pub fn decode_frame(body: &[u8]) -> Result<HubMessage> {
-    let msg: HubMessage = ciborium::from_reader(body)?;
+/// Decode a `DualieMessage` from the body bytes of one frame (no length prefix).
+pub fn decode_frame(body: &[u8]) -> Result<DualieMessage> {
+    let msg: DualieMessage = ciborium::from_reader(body)?;
     Ok(msg)
 }

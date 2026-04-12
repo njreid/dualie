@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::protocol::HubMessage;
+use crate::protocol::DualieMessage;
 use crate::transport::{MAX_FRAME_BYTES, decode_frame, encode_frame};
 
 // ── TcpPeer ───────────────────────────────────────────────────────────────────
@@ -32,13 +32,13 @@ impl TcpPeer {
         Ok(Self::new(stream))
     }
 
-    pub async fn send(&mut self, msg: &HubMessage) -> Result<()> {
+    pub async fn send(&mut self, msg: &DualieMessage) -> Result<()> {
         let frame = encode_frame(msg)?;
         self.stream.write_all(&frame).await?;
         Ok(())
     }
 
-    pub async fn recv(&mut self) -> Result<HubMessage> {
+    pub async fn recv(&mut self) -> Result<DualieMessage> {
         let mut len_buf = [0u8; 4];
         self.stream
             .read_exact(&mut len_buf)
@@ -70,7 +70,7 @@ pub struct TcpPeerWriter(tokio::net::tcp::OwnedWriteHalf);
 pub struct TcpPeerReader(tokio::net::tcp::OwnedReadHalf);
 
 impl TcpPeerWriter {
-    pub async fn send(&mut self, msg: &HubMessage) -> Result<()> {
+    pub async fn send(&mut self, msg: &DualieMessage) -> Result<()> {
         let frame = encode_frame(msg)?;
         self.0.write_all(&frame).await?;
         Ok(())
@@ -78,7 +78,7 @@ impl TcpPeerWriter {
 }
 
 impl TcpPeerReader {
-    pub async fn recv(&mut self) -> Result<HubMessage> {
+    pub async fn recv(&mut self) -> Result<DualieMessage> {
         let mut len_buf = [0u8; 4];
         self.0
             .read_exact(&mut len_buf)

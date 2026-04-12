@@ -34,33 +34,18 @@ pub struct FileChunk {
     pub total_size:  u64,
 }
 
-// ── Hub↔Daemon message ────────────────────────────────────────────────────────
+// ── RP2040 ↔ Daemon message ───────────────────────────────────────────────────
 
-/// All messages that flow over the TCP link between hub and daemon.
+/// All messages exchanged between the RP2040 firmware and the daemon over the
+/// CDC-ACM serial channel.
 ///
-/// Framing: each message is serialised to CBOR and prefixed by a
-/// little-endian u32 byte-length.  The transport layer handles framing;
-/// protocol code only sees `HubMessage` values.
+/// Framing: COBS-encoded, `0x00`-delimited.  Each message body is CBOR.
+/// The `serial` module handles framing; protocol code only sees
+/// `DualieMessage` values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum HubMessage {
-    // ── Session ──────────────────────────────────────────────────────────────
-
-    /// First message sent by the daemon after TCP connect.
-    Hello {
-        /// Opaque stable identifier for the machine (e.g. hostname or UUID).
-        machine_id: String,
-        /// Protocol version — reject mismatches early.
-        protocol_version: u32,
-    },
-
-    /// Hub reply to `Hello`; carries initial state.
-    Welcome {
-        /// Which output slot the hub has assigned this daemon (0 = A, 1 = B).
-        output_slot: u8,
-        /// Currently active output slot across the whole switch.
-        active_output: u8,
-    },
+pub enum DualieMessage {
+    // ── Keepalive ────────────────────────────────────────────────────────────
 
     /// Application-level keepalive.
     Ping,
@@ -68,13 +53,13 @@ pub enum HubMessage {
 
     // ── KVM switching ────────────────────────────────────────────────────────
 
-    /// Daemon → Hub: user triggered a virtual action (vkey slot fired).
-    /// Hub interprets the action (switch output, relay clipboard, etc.).
+    /// RP2040 → Daemon: a caps-layer virtual action was triggered.
+    /// The daemon looks up `slot` in its config and executes the action.
     VirtualAction {
         slot: u8,
     },
 
-    /// Hub → all daemons: the active output has changed.
+    /// Daemon → RP2040 (or RP2040 → Daemon): active output changed.
     ActiveOutput {
         output: u8,
     },
@@ -84,12 +69,12 @@ pub enum HubMessage {
     /// Either direction: push text clipboard content.
     ClipboardPush(ClipboardText),
 
-    /// Daemon → Hub: request the clipboard from the other machine.
+    /// Daemon → RP2040: request clipboard from the other machine.
     ClipboardPull,
 
     // ── File sync ────────────────────────────────────────────────────────────
 
-    /// Daemon → Hub (or Hub → Daemon): announce local file inventory.
+    /// Either direction: announce local file inventory.
     SyncList {
         files: Vec<SyncEntry>,
     },
@@ -97,21 +82,26 @@ pub enum HubMessage {
     /// Either direction: transfer a chunk of a file.
     SyncChunk(FileChunk),
 
-    /// Hub → Daemon: acknowledge receipt of the final chunk.
+    /// Acknowledge receipt of the final chunk.
     SyncAck {
         rel_path: String,
     },
 
     // ── Config ───────────────────────────────────────────────────────────────
 
-    /// Daemon → Hub: request the current config.
+    /// Daemon → RP2040: request the current config.
     ConfigRequest,
 
-    /// Hub → Daemon: deliver config as a CBOR blob (avoids `proto` depending
-    /// on the daemon's `DualieConfig` type).
+    /// RP2040 → Daemon: deliver config as a CBOR blob.
     ConfigPush {
         cbor: Vec<u8>,
     },
+
+    // ── Firmware management ──────────────────────────────────────────────────
+
+    /// Daemon → RP2040: reboot into USB MSC bootloader (RPI-RP2 drive).
+    /// The RP2040 calls `reset_usb_boot(0, 0)` from the bootrom.
+    RebootToBootloader,
 
     // ── Errors ───────────────────────────────────────────────────────────────
 

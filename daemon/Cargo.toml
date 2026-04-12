@@ -39,8 +39,7 @@ anyhow    = { workspace = true }
 thiserror = { workspace = true }
 
 # CLI arguments
-clap     = { version = "4", features = ["derive"] }
-hostname = { version = "0.4" }
+clap = { version = "4", features = ["derive"] }
 
 # No extra platform deps needed:
 # - macOS app discovery uses Command::new("mdfind") / "defaults" / "open"

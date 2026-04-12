@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use dualie_proto::HubMessage;
+use dualie_proto::DualieMessage;
 
 // ── Per-daemon relay handle ───────────────────────────────────────────────────
 
 /// A send handle that lets any task push a message to a specific daemon.
-pub type DaemonTx = mpsc::Sender<HubMessage>;
+pub type DaemonTx = mpsc::Sender<DualieMessage>;
 
 // ── Slot assignment ───────────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ impl HubState {
     }
 
     /// Broadcast a message to all connected daemons.
-    pub async fn broadcast(&self, msg: &HubMessage) {
+    pub async fn broadcast(&self, msg: &DualieMessage) {
         for tx in [&self.daemon_a, &self.daemon_b].into_iter().flatten() {
             // Best-effort; a full channel means the daemon is slow — drop the frame.
             let _ = tx.try_send(msg.clone());

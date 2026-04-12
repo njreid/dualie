@@ -16,7 +16,7 @@ mod web;
 use config::DualieConfig;
 use device::DeviceState;
 
-/// Dualie daemon – serves the config web UI and dispatches virtual key actions.
+/// Dualie daemon – local keyboard remapping and RP2040 serial peer.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
@@ -28,14 +28,10 @@ struct Args {
     #[arg(long)]
     dev: bool,
 
-    /// Address of the Dualie hub (Pi Zero 2W), e.g. 10.0.1.1:7475.
-    /// If omitted, the daemon runs standalone without hub features.
+    /// Path to the CDC-ACM serial device for the local RP2040.
+    /// Auto-detected from /dev/ttyACM* if omitted.
     #[arg(long)]
-    hub: Option<String>,
-
-    /// Stable identifier for this machine sent to the hub (defaults to hostname).
-    #[arg(long)]
-    machine_id: Option<String>,
+    serial: Option<String>,
 }
 
 pub struct AppState {
@@ -65,15 +61,12 @@ async fn main() -> Result<()> {
         dev_mode: args.dev,
     });
 
-    // Optionally connect to the hub
-    if let Some(hub_addr) = args.hub {
-        let id = args.machine_id
-            .or_else(|| hostname::get().ok()?.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_owned());
-        info!("Connecting to hub at {hub_addr} as machine '{id}'");
-        let _client = peer::spawn(hub_addr, id);
-        // _client is kept alive for the process lifetime; expose via AppState later
-    }
+    // Spawn serial peer for the local RP2040 (auto-detect or use --serial path).
+    // TODO (Phase 1.3): implement auto-detection in peer::detect_serial_path().
+    let serial_path = args.serial.unwrap_or_else(|| "/dev/ttyACM0".to_owned());
+    info!("Opening RP2040 serial connection on {serial_path}");
+    let _serial_client = peer::spawn(serial_path);
+    // _serial_client kept alive for the process lifetime; expose via AppState in Phase 1.3
 
     // Start key interceptor on a dedicated OS thread (rdev blocks)
     let intercept_state = Arc::clone(&state);
