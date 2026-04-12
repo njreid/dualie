@@ -44,7 +44,6 @@
 use crate::config::{
     CapsLayerEntry, DualieConfig, KeyRemap,
     CAPS_ENTRY_CHORD, CAPS_ENTRY_VIRTUAL, CAPS_LAYER_MAX,
-    VKEY_TABLE,
 };
 
 /// Must match REMAP_FLAG_MOD_ONLY in src/include/config.h
@@ -125,8 +124,9 @@ fn write_caps_entry(buf: &mut [u8], offset: usize, e: &CapsLayerEntry) {
     if e.entry_type == CAPS_ENTRY_CHORD {
         buf[offset + 4..offset + 8].copy_from_slice(&e.dst_keycodes);
     } else if e.entry_type == CAPS_ENTRY_VIRTUAL {
-        // vaction_idx in first byte of union, rest zero
-        buf[offset + 4] = VKEY_TABLE.get(e.vaction_idx as usize).copied().unwrap_or(0);
+        // vaction_idx stored directly — firmware sends VirtualAction { slot }
+        // over CDC-ACM serial instead of emitting an F13-F24 HID keycode.
+        buf[offset + 4] = e.vaction_idx;
         buf[offset + 5] = 0;
         buf[offset + 6] = 0;
         buf[offset + 7] = 0;

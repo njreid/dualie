@@ -5,27 +5,10 @@ use std::path::PathBuf;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+/// Number of virtual action slots (0-31).
+/// Previously these mapped to F13–F24 + other HID keycodes; now the RP2040
+/// sends `DualieMessage::VirtualAction { slot }` over CDC-ACM serial directly.
 pub const DUALIE_VKEY_COUNT: usize = 32;
-
-/// HID keycodes emitted for virtual action slots 0-31.
-/// Must stay in sync with firmware vkeys.h.
-pub const VKEY_TABLE: [u8; DUALIE_VKEY_COUNT] = [
-    // Slots 0-11: F13-F24
-    0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D,
-    0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73,
-    // Slots 12-19: Execute…Cut
-    0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B,
-    // Slots 20-27: International1-8
-    0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E,
-    // Slots 28-31: Lang1-4
-    0x90, 0x91, 0x92, 0x93,
-];
-
-/// Return the vaction slot index for a raw HID keycode, if it's a virtual key.
-#[allow(dead_code)]
-pub fn vkey_slot(hid_code: u8) -> Option<usize> {
-    VKEY_TABLE.iter().position(|&k| k == hid_code)
-}
 
 // ── Virtual action definitions ────────────────────────────────────────────────
 
@@ -317,15 +300,6 @@ mod tests {
         assert_eq!(v["label"], "Foo");
     }
 
-    #[test]
-    fn vkey_slot_lookup() {
-        // Slot 0 = 0x68 (F13)
-        assert_eq!(vkey_slot(0x68), Some(0));
-        // Slot 11 = 0x73 (F24)
-        assert_eq!(vkey_slot(0x73), Some(11));
-        // Not in table
-        assert_eq!(vkey_slot(0x99), None);
-    }
 }
 
 pub fn config_path() -> PathBuf {
