@@ -1,6 +1,6 @@
 # Dualie — KVM Switch with Key Remapping and Virtual Actions
 
-Dualie is a fork of the outstanding [DeskHop](https://github.com/hrvach/deskhop) project that adds a host-side daemon, a browser-based configuration UI, key remapping, a caps-lock shortcut layer, and virtual actions — and applies all of that remapping to every keyboard on the machine, not just the one plugged into the hardware switch.
+Dualie is a fork of the outstanding [DeskHop](https://github.com/hrvach/deskhop) project that adds a host-side daemon, a KDL config file, key remapping, a caps-lock shortcut layer, and virtual actions — and applies all of that remapping to every keyboard on the machine, not just the one plugged into the hardware switch.
 
 ![DeskHop case and board](img/case_and_board_s.png)
 
@@ -40,11 +40,10 @@ See [HARDWARE.md](HARDWARE.md) for the full hardware design.
 ### Repository layout
 
 ```
-daemon/     Rust — headless daemon: serial peer, local keyboard intercept, action dispatch, Unix socket status
-tui/        Rust — dualie-tui: Ratatui terminal UI for config editing, status, sync pairs
-proto/      Rust — shared DualieMessage types and serial framing
-src/        C — RP2040 firmware (DeskHop fork)
-shared/     keycodes.json — shared by TUI and daemon
+daemon/     Rust — headless daemon: serial peer, config hot-reload, action dispatch, Unix socket status
+tui/        Rust — dualie-tui: Ratatui terminal UI for config editing, status, sync pairs (Phase 5)
+proto/      Rust — shared DualieMessage types and CDC-ACM serial framing
+src/        C — RP2040 firmware (DeskHop fork + CDC-ACM serial channel)
 ```
 
 ### Building and running (dualie-specific)

@@ -2,7 +2,7 @@
 name        = "dualie"
 version     = "0.1.0"
 edition     = "2021"
-description = "Dualie KVM switch daemon – serves config UI and dispatches virtual key actions"
+description = "Dualie KVM switch daemon – local keyboard remapping and RP2040 serial peer"
 license     = "GPL-3.0"
 
 [[bin]]
@@ -12,23 +12,25 @@ path = "src/main.rs"
 [dependencies]
 dualie-proto = { path = "../proto" }
 
-# Async runtime + web framework
-tokio        = { workspace = true }
-axum         = { version = "0.7",  features = ["macros"] }
-tower        = { version = "0.4" }
-tower-http   = { version = "0.5",  features = ["fs", "cors"] }
+# Async runtime
+tokio = { workspace = true }
 
 # Serialisation
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-ciborium     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }   # retained for `dualie convert` migration tool
+ciborium   = { workspace = true }
 
 # Config / storage
-directories  = { version = "5" }    # platform config/data dirs
+directories = { version = "5" }    # platform config/data dirs
 
-# Key interception (CGEventTap on Mac, evdev on Linux)
-# unstable_grab enables event suppression on macOS via CGEventTap
-rdev         = { version = "0.5", features = ["unstable_grab"] }
+# KDL config (Phase 2)
+kdl    = { version = "6" }         # KDL document model + parser
+miette = { version = "7", features = ["fancy"] }  # parse error reporting with source spans
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }  # file watcher
+
+# Key interception — rdev still compiled in for Phase 3/4 groundwork.
+# unstable_grab: CGEventTap suppression on macOS
+rdev = { version = "0.5", features = ["unstable_grab"] }
 
 # Logging
 tracing            = { workspace = true }
@@ -41,10 +43,5 @@ thiserror = { workspace = true }
 # CLI arguments
 clap = { version = "4", features = ["derive"] }
 
-# No extra platform deps needed:
-# - macOS app discovery uses Command::new("mdfind") / "defaults" / "open"
-# - Linux app discovery uses std::fs to walk XDG dirs and parse .desktop files
-# - rdev pulls in platform event APIs transitively
-
 [dev-dependencies]
-tokio-test  = { version = "0.4" }
+tokio-test = { version = "0.4" }

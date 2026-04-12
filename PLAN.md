@@ -1,10 +1,14 @@
 # Dualie Implementation Plan
 
-## Current state
+## Status
 
-The daemon serves a Svelte web UI over HTTP, persists config as JSON, and intercepts virtual
-keys (F13–F24) fired by the RP2040. Remapping is applied in firmware only, to the
-hardware-connected keyboard.
+**Phase 1 ✓ complete** — Serial peer, F13–F24 retired, firmware CDC-ACM, `just flash`.
+
+**Phase 2 ✓ complete** — KDL config with hot-reload, web UI removed, Unix socket status server.
+
+**Current state:** The daemon loads `~/.config/dualie/dualie.kdl` (hot-reloaded via notify),
+maintains a CDC-ACM serial connection to the RP2040 with auto-reconnect, and exposes a status
+socket at `$XDG_RUNTIME_DIR/dualie/daemon.sock`. The intercept layer is a stub pending Phase 3.
 
 ## Target state
 
@@ -107,25 +111,21 @@ RP2040-A finishes its own flash. No second USB connection needed.
 
 ### 2.1 Add KDL config parsing
 
-Dependencies in `daemon/Cargo.toml`:
+Dependencies added to `daemon/Cargo.toml` ✓:
 ```toml
-kdl      = { version = "6" }
-knuffel  = { version = "3" }    # typed KDL deserialiser
-miette   = { version = "7", features = ["fancy"] }  # parse error reporting
-notify   = { version = "6" }    # file watcher for hot-reload
+kdl    = { version = "6" }                              # KDL DOM parser
+miette = { version = "7", features = ["fancy"] }        # parse error reporting with spans
+notify = { version = "6", features = ["macos_kqueue"] } # file watcher for hot-reload
 ```
 
-Replace `daemon/src/config.rs`:
-- `DualieConfig` derives `knuffel::Decode` instead of `serde::Deserialize`
-- Config path: `~/.config/dualie/config.kdl` (via `proto::paths::config_file()`, update
-  extension)
-- `DualieConfig::load_or_default()` — parse KDL, report errors with miette spans
-- `DualieConfig::save()` — serialise back to KDL (use `kdl` crate to build document)
-- `DualieConfig::watch()` — returns a `notify::Watcher` that sends on a channel when the
-  file changes; daemon reloads and applies without restart
+`daemon/src/config.rs` ✓:
+- Hand-written KDL parser (`DualieConfig::from_kdl`) and serialiser (`to_kdl_string`)
+- Config path: `~/.config/dualie/dualie.kdl`
+- `load_or_default()` — tries KDL, falls back to legacy `config.json`, then default
+- `watch()` — spawns notify watcher, returns `watch::Receiver<DualieConfig>`
 
-Migration: provide a `dualie convert` subcommand that reads the old `config.json` and
-writes `config.kdl`.
+Legacy JSON migration: `load_or_default` auto-migrates on first load; explicit
+`dualie convert` subcommand can be added when needed.
 
 ### 2.2 Remove the web UI and HTTP server
 
@@ -149,45 +149,48 @@ Add Unix socket status server in its place (small, ~50 lines):
 - Accepts connections, streams `DualieMessage::Status { active_output, rp2040_connected }`
 - TUI connects here for live status display
 
-### 2.3 Config KDL schema
+### 2.3 Config KDL schema ✓ implemented
 
 ```kdl
-version 1
+// dualie.kdl — Dualie daemon configuration
+// Keys: single char (a-z, 0-9), named (esc left volup f1…), or 0x hex keycode.
+// Modifiers: lctrl lshift lalt lmeta rctrl rshift ralt rmeta
+//            short: ctrl shift alt meta cmd win super
 
-output "a" {
-    key-remaps {
-        remap src="caps"  dst="escape"
-        remap src="lctrl" dst="lalt"
+output A {
+    actions {
+        // Implicit slot assignment by order (0, 1, …). Referenced by label in layers.
+        launch "Slack"    app-id="com.tinyspeck.slackmacgap"
+        shell  "Terminal" command="open -a Terminal"
     }
-    modifier-remaps {
-        remap src="lctrl" dst="lalt"
+
+    remap {
+        key capslock esc                    // single char or named key
+        key 0x39 0x29                       // raw HID keycodes
+        key a a src-mod=lctrl               // require modifier to match
+        modifier lalt rctrl                 // swap modifier globally on every report
     }
-    caps-layer passthrough=true {
-        entry src="h" dst="left"
-        entry src="j" dst="down"
-        entry src="k" dst="up"
-        entry src="l" dst="right"
-        entry src="1" type="jump-a"
-        entry src="2" type="jump-b"
-        entry src="space" type="swap"
-        entry src="t" type="action" slot=0
-    }
-    virtual-actions {
-        slot 0 type="app-launch" app-id="org.wezfurlong.wezterm" label="Terminal"
-        slot 1 type="shell" command="rofi -show drun" label="Launcher"
+
+    layers {
+        caps {
+            chord  a e                      // caps+A → E
+            chord  b ctrl_t                 // caps+B → Ctrl+T
+            chord  c ctrl_shift_a           // caps+C → Ctrl+Shift+A
+            action s "Slack"                // caps+S → fire Slack action (slot 0)
+            jump-a h                        // caps+H → switch to output A
+            jump-b k                        // caps+K → switch to output B
+            swap   n                        // caps+N → toggle output
+        }
     }
 }
 
-output "b" {
-    // ...
-}
-
-sync-pairs {
-    pair "nvim"  local="~/.config/nvim"
-    pair "ssh"   local="~/.ssh" recursive=false
-    pair "fish"  local="~/.config/fish"
-}
+output B {}
 ```
+
+Notes:
+- `output A` / `output B` — bare KDL v2 identifiers (quotes optional)
+- Chord modifier prefix uses underscores: `ctrl_t`, `ctrl_shift_a`, `alt_f4`
+- `action` resolves label to slot at parse time; reordering `actions` is safe
 
 ---
 

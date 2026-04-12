@@ -13,10 +13,10 @@
 /// Platform implementations go in `linux.rs` and `macos.rs` respectively.
 /// This module is a stub until Phase 2 is implemented.
 
-use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::info;
 
-use crate::AppState;
+use crate::config::DualieConfig;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -28,9 +28,9 @@ use crate::AppState;
 /// On macOS: installs a CGEventTap and re-injects remapped events via the
 /// Karabiner-VirtualHIDDevice driver.
 ///
-/// Currently a no-op stub — implementation in Phase 2/3.
-pub fn run(_state: Arc<AppState>) -> anyhow::Result<()> {
-    info!("Local keyboard intercept: not yet implemented (Phase 2/3)");
+/// Currently a no-op stub — implementation in Phase 3/4.
+pub fn run(_cfg_rx: watch::Receiver<DualieConfig>) -> anyhow::Result<()> {
+    info!("local keyboard intercept: not yet implemented (Phase 3/4)");
     // TODO Phase 3 (Linux):  intercept/linux.rs  — evdev EVIOCGRAB + uinput
     // TODO Phase 4 (macOS):  intercept/macos.rs  — CGEventTap + Karabiner driver
     Ok(())

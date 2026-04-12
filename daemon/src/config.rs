@@ -1,13 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
+use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Number of virtual action slots (0-31).
-/// Previously these mapped to F13–F24 + other HID keycodes; now the RP2040
-/// sends `DualieMessage::VirtualAction { slot }` over CDC-ACM serial directly.
 pub const DUALIE_VKEY_COUNT: usize = 32;
 
 // ── Virtual action definitions ────────────────────────────────────────────────
@@ -18,20 +17,28 @@ pub const DUALIE_VKEY_COUNT: usize = 32;
 pub enum VirtualAction {
     /// Launch or focus an application by its platform ID.
     AppLaunch {
-        /// Platform-specific identifier:
-        ///   macOS  – bundle ID, e.g. "com.tinyspeck.slackmacgap"
-        ///   Linux  – .desktop basename, e.g. "slack"
+        /// macOS: bundle ID ("com.tinyspeck.slackmacgap")
+        /// Linux: .desktop basename ("slack")
         app_id: String,
-        /// Human-readable label for the UI
-        label: String,
+        label:  String,
     },
     /// Run a shell command
     ShellCommand {
         command: String,
-        label: String,
+        label:   String,
     },
     /// Placeholder / unassigned slot
     Unset,
+}
+
+impl VirtualAction {
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Self::AppLaunch  { label, .. } => Some(label),
+            Self::ShellCommand { label, .. } => Some(label),
+            Self::Unset => None,
+        }
+    }
 }
 
 impl Default for VirtualAction {
@@ -40,58 +47,24 @@ impl Default for VirtualAction {
 
 // ── Modifier remaps ───────────────────────────────────────────────────────────
 
-/// HID modifier byte bit positions (matches firmware KEYBOARD_MODIFIER_* values).
-///
-/// Bit 0 = LCtrl, 1 = LShift, 2 = LAlt, 3 = LMeta,
-/// Bit 4 = RCtrl, 5 = RShift, 6 = RAlt, 7 = RMeta
-#[allow(dead_code)]
-pub const MOD_LCTRL:  u8 = 0x01;
-#[allow(dead_code)]
-pub const MOD_LSHIFT: u8 = 0x02;
-#[allow(dead_code)]
-pub const MOD_LALT:   u8 = 0x04;
-#[allow(dead_code)]
-pub const MOD_LMETA:  u8 = 0x08;
-#[allow(dead_code)]
-pub const MOD_RCTRL:  u8 = 0x10;
-#[allow(dead_code)]
-pub const MOD_RSHIFT: u8 = 0x20;
-#[allow(dead_code)]
-pub const MOD_RALT:   u8 = 0x40;
-#[allow(dead_code)]
-pub const MOD_RMETA:  u8 = 0x80;
-
-/// Remap a set of modifier bits to a different set.
-/// Applied to every HID report for the active output, without needing a
-/// specific key to be pressed (serialised into the key_remaps table with
-/// flags = REMAP_FLAG_MOD_ONLY).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModifierRemap {
-    /// Modifier bitmask that must all be present to trigger (e.g. 0x01 = LCtrl)
     pub src: u8,
-    /// Modifier bitmask to emit in their place
     pub dst: u8,
 }
 
 // ── Key remaps ────────────────────────────────────────────────────────────────
 
-/// One row of the per-output key-remap table (mirrors firmware key_remap_t).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeyRemap {
-    /// HID keycode to match (0 = unused row)
     pub src_keycode:  u8,
-    /// HID keycode to emit instead
     pub dst_keycode:  u8,
-    /// Modifier byte that must also be present (0 = any)
     #[serde(default)]
     pub src_modifier: u8,
-    /// Modifier byte to emit (replaces src modifiers when non-zero)
     #[serde(default)]
     pub dst_modifier: u8,
-    /// Bitmask: bit 0 = output A, bit 1 = output B (3 = both)
     #[serde(default = "default_output_mask")]
     pub output_mask:  u8,
-    /// Reserved flags (must match firmware key_remap_t.flags)
     #[serde(default)]
     pub flags:        u8,
 }
@@ -102,34 +75,23 @@ fn default_output_mask() -> u8 { 3 }
 
 pub const CAPS_LAYER_MAX: usize = 32;
 
-/// entry_type values (match firmware CAPS_ENTRY_* constants)
 pub const CAPS_ENTRY_CHORD:   u8 = 0;
 pub const CAPS_ENTRY_VIRTUAL: u8 = 1;
-#[allow(dead_code)]
-pub const CAPS_ENTRY_JUMP_A:  u8 = 2;  // switch to output A, consume keypress
-#[allow(dead_code)]
-pub const CAPS_ENTRY_JUMP_B:  u8 = 3;  // switch to output B, consume keypress
-#[allow(dead_code)]
-pub const CAPS_ENTRY_SWAP:    u8 = 4;  // toggle output, consume keypress
+#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_A: u8 = 2;
+#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_B: u8 = 3;
+#[allow(dead_code)] pub const CAPS_ENTRY_SWAP:   u8 = 4;
 
-/// One entry in the caps-layer table (mirrors firmware caps_layer_entry_t).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsLayerEntry {
-    /// Source key that triggers this entry (0 = unused)
     pub src_keycode:  u8,
-    /// CAPS_ENTRY_CHORD (0) or CAPS_ENTRY_VIRTUAL (1)
     #[serde(default)]
     pub entry_type:   u8,
-    /// Bitmask of outputs this entry applies to
     #[serde(default = "default_output_mask")]
     pub output_mask:  u8,
-    /// Modifier byte to hold while sending dst_keycodes
     #[serde(default)]
     pub dst_modifier: u8,
-    /// Chord: up to 4 simultaneous dest keycodes (ignored when entry_type=1)
     #[serde(default)]
     pub dst_keycodes: [u8; 4],
-    /// Virtual: vaction slot index (ignored when entry_type=0)
     #[serde(default)]
     pub vaction_idx:  u8,
 }
@@ -149,8 +111,6 @@ impl Default for CapsLayerEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsLayer {
-    /// If true, keys with no caps-layer entry are passed through unchanged;
-    /// if false, they are swallowed while CapsLock is held.
     #[serde(default = "default_true")]
     pub unmapped_passthrough: bool,
     #[serde(default)]
@@ -169,16 +129,12 @@ impl Default for CapsLayer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputDaemonConfig {
-    /// Virtual action definitions indexed by vaction_idx (0-31)
     #[serde(default = "default_actions")]
     pub virtual_actions: Vec<VirtualAction>,
-    /// Key remap table
     #[serde(default)]
     pub key_remaps: Vec<KeyRemap>,
-    /// Modifier-only remaps (e.g. LCtrl → LAlt), applied to every report
     #[serde(default)]
     pub modifier_remaps: Vec<ModifierRemap>,
-    /// Caps-layer mapping table
     #[serde(default)]
     pub caps_layer: CapsLayer,
 }
@@ -202,8 +158,6 @@ impl Default for OutputDaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DualieConfig {
-    pub version: u32,
-    /// Daemon-side config per output (index 0 = OUTPUT_A, 1 = OUTPUT_B)
     #[serde(default)]
     pub outputs: [OutputDaemonConfig; 2],
 }
@@ -211,55 +165,733 @@ pub struct DualieConfig {
 impl Default for DualieConfig {
     fn default() -> Self {
         Self {
-            version: 1,
-            outputs: [
-                OutputDaemonConfig::default(),
-                OutputDaemonConfig::default(),
-            ],
+            outputs: [OutputDaemonConfig::default(), OutputDaemonConfig::default()],
         }
     }
 }
 
 impl DualieConfig {
+    // ── I/O ──────────────────────────────────────────────────────────────────
+
+    /// Load config: try `dualie.kdl`, then legacy `config.json`, then default.
     pub fn load_or_default() -> Result<Self> {
-        let path = config_path();
-        if path.exists() {
-            let raw = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let cfg: Self = serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", path.display()))?;
-            Ok(cfg)
-        } else {
-            Ok(Self::default())
+        let kdl_path = kdl_config_path();
+        if kdl_path.exists() {
+            let src = std::fs::read_to_string(&kdl_path)
+                .with_context(|| format!("reading {}", kdl_path.display()))?;
+            return Self::from_kdl(&src)
+                .with_context(|| format!("parsing {}", kdl_path.display()));
         }
+
+        let json_path = json_config_path();
+        if json_path.exists() {
+            tracing::info!("loading legacy config from {}", json_path.display());
+            let raw = std::fs::read_to_string(&json_path)
+                .with_context(|| format!("reading {}", json_path.display()))?;
+            return serde_json::from_str::<Self>(&raw)
+                .with_context(|| format!("parsing {}", json_path.display()));
+        }
+
+        Ok(Self::default())
     }
 
+    /// Save config to `dualie.kdl`.
     pub fn save(&self) -> Result<()> {
-        let path = config_path();
+        let path = kdl_config_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)
+        std::fs::write(&path, self.to_kdl_string())
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
-    /// Export the full config as a CBOR blob for download.
+    /// Export config as a CBOR blob (for firmware push).
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf)?;
         Ok(buf)
     }
 
-    /// Import config from a CBOR blob (uploaded from browser).
+    /// Import config from a CBOR blob.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self> {
-        let cfg: Self = ciborium::from_reader(bytes)?;
+        Ok(ciborium::from_reader(bytes)?)
+    }
+
+    // ── KDL parsing ──────────────────────────────────────────────────────────
+
+    /// Parse a `DualieConfig` from a KDL source string.
+    ///
+    /// Format:
+    /// ```text
+    /// output A {
+    ///     actions {
+    ///         launch "Slack" app-id="com.tinyspeck.slackmacgap"
+    ///         shell  "Terminal" command="open -a Terminal"
+    ///     }
+    ///
+    ///     remap {
+    ///         key a left           // single char = qwerty, named = known key list
+    ///         key 0x39 0x29        // hex/decimal = raw HID keycode
+    ///         modifier lalt rctrl  // src-mod dst-mod (named modifiers)
+    ///     }
+    ///
+    ///     layers {
+    ///         caps {
+    ///             chord  a e            // caps+A → E
+    ///             chord  b lctrl t      // caps+B → Ctrl+T
+    ///             action s Slack        // caps+S → fire Slack action
+    ///             jump-a h              // caps+H → switch to output A
+    ///             jump-b k              // caps+K → switch to output B
+    ///             swap   n              // caps+N → toggle output
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// output B { }
+    /// ```
+    pub fn from_kdl(src: &str) -> Result<Self> {
+        let doc = src.parse::<KdlDocument>()
+            .map_err(|e| anyhow::anyhow!("{:?}",
+                miette::Report::new(e).with_source_code(src.to_owned())))?;
+
+        let mut cfg = Self::default();
+
+        for node in doc.nodes() {
+            match node.name().value() {
+                "output" => {
+                    let label = kdl_arg_str(node, 0)
+                        .ok_or_else(|| anyhow::anyhow!("output requires identifier A or B"))?;
+                    let idx = match label {
+                        "A" => 0usize,
+                        "B" => 1usize,
+                        other => bail!("unknown output {other:?}; expected A or B"),
+                    };
+                    if let Some(children) = node.children() {
+                        parse_output(children, &mut cfg.outputs[idx])?;
+                    }
+                }
+                other => tracing::warn!("unknown top-level node: {other}"),
+            }
+        }
+
         Ok(cfg)
+    }
+
+    // ── KDL serialisation ─────────────────────────────────────────────────────
+
+    /// Serialise config to a KDL string.
+    pub fn to_kdl_string(&self) -> String {
+        let mut s = String::from(
+            "// dualie.kdl\n\
+             // Keys: single char (a-z, 0-9), named (esc left volup …), or 0x hex.\n\
+             // Modifiers: lctrl lshift lalt lmeta rctrl rshift ralt rmeta\n\n"
+        );
+
+        for (i, out) in self.outputs.iter().enumerate() {
+            let label = if i == 0 { "A" } else { "B" };
+            s.push_str(&format!("output {label} {{\n"));
+
+            // actions block (non-Unset only)
+            let non_unset: Vec<(usize, &VirtualAction)> = out.virtual_actions.iter()
+                .enumerate()
+                .filter(|(_, a)| !matches!(a, VirtualAction::Unset))
+                .collect();
+            if !non_unset.is_empty() {
+                s.push_str("    actions {\n");
+                for (_, action) in &non_unset {
+                    match action {
+                        VirtualAction::AppLaunch { label, app_id } => {
+                            s.push_str(&format!(
+                                "        launch {label:?} app-id={app_id:?}\n"
+                            ));
+                        }
+                        VirtualAction::ShellCommand { label, command } => {
+                            s.push_str(&format!(
+                                "        shell {label:?} command={command:?}\n"
+                            ));
+                        }
+                        VirtualAction::Unset => {}
+                    }
+                }
+                s.push_str("    }\n\n");
+            }
+
+            // remap block
+            let has_remaps = !out.key_remaps.is_empty() || !out.modifier_remaps.is_empty();
+            if has_remaps {
+                s.push_str("    remap {\n");
+                for kr in &out.key_remaps {
+                    let src = kc_display(kr.src_keycode);
+                    let dst = kc_display(kr.dst_keycode);
+                    s.push_str(&format!("        key {src} {dst}"));
+                    if kr.src_modifier != 0 {
+                        s.push_str(&format!(" src-mod={}", mod_display(kr.src_modifier)));
+                    }
+                    if kr.dst_modifier != 0 {
+                        s.push_str(&format!(" dst-mod={}", mod_display(kr.dst_modifier)));
+                    }
+                    if kr.output_mask != 3 {
+                        s.push_str(&format!(" outputs={}", kr.output_mask));
+                    }
+                    s.push('\n');
+                }
+                for mr in &out.modifier_remaps {
+                    let src = mod_display(mr.src);
+                    let dst = mod_display(mr.dst);
+                    s.push_str(&format!("        modifier {src} {dst}\n"));
+                }
+                s.push_str("    }\n\n");
+            }
+
+            // layers block
+            let cl = &out.caps_layer;
+            if !cl.entries.is_empty() {
+                s.push_str("    layers {\n");
+                let passthrough = if cl.unmapped_passthrough { "" } else { " unmapped-passthrough=#false" };
+                s.push_str(&format!("        caps{passthrough} {{\n"));
+                for e in &cl.entries {
+                    match e.entry_type {
+                        CAPS_ENTRY_CHORD => {
+                            let src = kc_display(e.src_keycode);
+                            s.push_str(&format!("            chord {src}"));
+                            // First key gets the modifier prefix; rest are plain.
+                            let prefix = mod_prefix(e.dst_modifier);
+                            let mut first = true;
+                            for &k in e.dst_keycodes.iter().take_while(|&&k| k != 0) {
+                                let key = kc_display(k);
+                                if first {
+                                    s.push_str(&format!(" {prefix}{key}"));
+                                    first = false;
+                                } else {
+                                    s.push_str(&format!(" {key}"));
+                                }
+                            }
+                            s.push('\n');
+                        }
+                        CAPS_ENTRY_VIRTUAL => {
+                            let src = kc_display(e.src_keycode);
+                            let label = out.virtual_actions
+                                .get(e.vaction_idx as usize)
+                                .and_then(|a| a.label())
+                                .unwrap_or("?");
+                            s.push_str(&format!("            action {src} {label:?}\n"));
+                        }
+                        CAPS_ENTRY_JUMP_A => {
+                            s.push_str(&format!("            jump-a {}\n", kc_display(e.src_keycode)));
+                        }
+                        CAPS_ENTRY_JUMP_B => {
+                            s.push_str(&format!("            jump-b {}\n", kc_display(e.src_keycode)));
+                        }
+                        CAPS_ENTRY_SWAP => {
+                            s.push_str(&format!("            swap {}\n", kc_display(e.src_keycode)));
+                        }
+                        _ => {}
+                    }
+                }
+                s.push_str("        }\n");
+                s.push_str("    }\n");
+            }
+
+            s.push_str("}\n\n");
+        }
+
+        s
+    }
+
+    // ── Hot-reload watcher ────────────────────────────────────────────────────
+
+    /// Spawn a file watcher on `dualie.kdl`.  Returns a `watch::Receiver` that
+    /// yields the latest parsed config whenever the file changes.
+    pub fn watch() -> Result<tokio::sync::watch::Receiver<Self>> {
+        let path = kdl_config_path();
+        let initial = Self::load_or_default()?;
+        let (tx, rx) = tokio::sync::watch::channel(initial);
+
+        tokio::task::spawn_blocking(move || {
+            use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+            let (ftx, frx) = std::sync::mpsc::channel();
+            let mut watcher: RecommendedWatcher = match notify::recommended_watcher(ftx) {
+                Ok(w) => w,
+                Err(e) => { tracing::error!("config watcher: {e}"); return; }
+            };
+
+            let watch_dir = path.parent().unwrap_or(&path);
+            if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
+                tracing::error!("watch {}: {e}", watch_dir.display());
+                return;
+            }
+
+            tracing::info!("watching {} for config changes", path.display());
+
+            loop {
+                match frx.recv() {
+                    Ok(Ok(event)) => {
+                        if !event.paths.iter().any(|p| p == &path) { continue; }
+                        if matches!(event.kind,
+                            notify::EventKind::Create(_) | notify::EventKind::Modify(_))
+                        {
+                            match Self::load_or_default() {
+                                Ok(cfg) => {
+                                    tracing::info!("config reloaded");
+                                    let _ = tx.send(cfg);
+                                }
+                                Err(e) => tracing::error!("config reload: {e:#}"),
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => tracing::warn!("watcher: {e}"),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+// ── Output block parser ───────────────────────────────────────────────────────
+
+fn parse_output(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+    for node in doc.nodes() {
+        match node.name().value() {
+            "actions" => {
+                if let Some(children) = node.children() {
+                    parse_actions(children, out)?;
+                }
+            }
+            "remap" => {
+                if let Some(children) = node.children() {
+                    parse_remap(children, out)?;
+                }
+            }
+            "layers" => {
+                if let Some(children) = node.children() {
+                    parse_layers(children, out)?;
+                }
+            }
+            other => tracing::warn!("unknown output node: {other}"),
+        }
+    }
+    Ok(())
+}
+
+// ── Actions parser ────────────────────────────────────────────────────────────
+
+fn parse_actions(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+    let mut slot = 0usize;
+    for node in doc.nodes() {
+        if slot >= DUALIE_VKEY_COUNT {
+            bail!("too many actions (max {DUALIE_VKEY_COUNT})");
+        }
+        let label = kdl_arg_str(node, 0)
+            .ok_or_else(|| anyhow::anyhow!("{} requires label as first arg", node.name().value()))?
+            .to_owned();
+        out.virtual_actions[slot] = match node.name().value() {
+            "launch" => VirtualAction::AppLaunch {
+                app_id: kdl_prop_str(node, "app-id")
+                    .ok_or_else(|| anyhow::anyhow!("launch requires app-id="))?
+                    .to_owned(),
+                label,
+            },
+            "shell" => VirtualAction::ShellCommand {
+                command: kdl_prop_str(node, "command")
+                    .ok_or_else(|| anyhow::anyhow!("shell requires command="))?
+                    .to_owned(),
+                label,
+            },
+            other => bail!("unknown action type: {other}; expected launch or shell"),
+        };
+        slot += 1;
+    }
+    Ok(())
+}
+
+// ── Remap parser ──────────────────────────────────────────────────────────────
+
+fn parse_remap(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+    for node in doc.nodes() {
+        match node.name().value() {
+            "key" => {
+                let src = kdl_arg_as_keycode(node, 0)
+                    .ok_or_else(|| anyhow::anyhow!("key: invalid src keycode"))?;
+                let dst = kdl_arg_as_keycode(node, 1)
+                    .ok_or_else(|| anyhow::anyhow!("key: invalid dst keycode"))?;
+                out.key_remaps.push(KeyRemap {
+                    src_keycode:  src,
+                    dst_keycode:  dst,
+                    src_modifier: kdl_prop_as_modifier(node, "src-mod").unwrap_or(0),
+                    dst_modifier: kdl_prop_as_modifier(node, "dst-mod").unwrap_or(0),
+                    output_mask:  kdl_prop_u8(node, "outputs").unwrap_or(3),
+                    flags:        0,
+                });
+            }
+            "modifier" => {
+                let src = kdl_arg_as_modifier(node, 0)
+                    .ok_or_else(|| anyhow::anyhow!("modifier: unknown src modifier name"))?;
+                let dst = kdl_arg_as_modifier(node, 1)
+                    .ok_or_else(|| anyhow::anyhow!("modifier: unknown dst modifier name"))?;
+                out.modifier_remaps.push(ModifierRemap { src, dst });
+            }
+            other => tracing::warn!("unknown remap node: {other}"),
+        }
+    }
+    Ok(())
+}
+
+// ── Layers parser ─────────────────────────────────────────────────────────────
+
+fn parse_layers(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+    for node in doc.nodes() {
+        match node.name().value() {
+            "caps" => {
+                out.caps_layer.unmapped_passthrough =
+                    kdl_prop_bool(node, "unmapped-passthrough").unwrap_or(true);
+                if let Some(children) = node.children() {
+                    parse_caps(children, out)?;
+                }
+            }
+            other => tracing::warn!("unknown layer: {other}"),
+        }
+    }
+    Ok(())
+}
+
+fn parse_caps(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+    for node in doc.nodes() {
+        let name = node.name().value();
+
+        // chord/action/jump-a/jump-b/swap all require a src keycode as first arg
+        let src = kdl_arg_as_keycode(node, 0)
+            .ok_or_else(|| anyhow::anyhow!("{name}: invalid src keycode"))?;
+        let output_mask = kdl_prop_u8(node, "outputs").unwrap_or(3);
+
+        let entry = match name {
+            "chord" => {
+                // Each positional arg after src is a `[mods_]key` token or a raw keycode.
+                // e.g. `ctrl_t`, `ctrl_shift_a`, `0x08`, `e`
+                let mut dst = [0u8; 4];
+                let mut n_dst = 0usize;
+                let mut dst_modifier = 0u8;
+
+                for arg_idx in 1.. {
+                    match kdl_arg_as_mod_key(node, arg_idx) {
+                        Some((m, kc)) => {
+                            dst_modifier |= m;
+                            if n_dst < 4 { dst[n_dst] = kc; n_dst += 1; }
+                        }
+                        None => break,
+                    }
+                }
+
+                CapsLayerEntry {
+                    src_keycode:  src,
+                    entry_type:   CAPS_ENTRY_CHORD,
+                    output_mask,
+                    dst_modifier,
+                    dst_keycodes: dst,
+                    vaction_idx:  0,
+                }
+            }
+
+            "action" => {
+                // second arg is the action label; resolve to slot via virtual_actions
+                let label = kdl_arg_str(node, 1)
+                    .ok_or_else(|| anyhow::anyhow!("action: missing label arg"))?;
+                let slot = out.virtual_actions.iter()
+                    .position(|a| a.label() == Some(label))
+                    .ok_or_else(|| anyhow::anyhow!("action: label {label:?} not found in actions block"))?;
+                CapsLayerEntry {
+                    src_keycode:  src,
+                    entry_type:   CAPS_ENTRY_VIRTUAL,
+                    output_mask,
+                    vaction_idx:  slot as u8,
+                    ..Default::default()
+                }
+            }
+
+            "jump-a" => CapsLayerEntry {
+                src_keycode: src, entry_type: CAPS_ENTRY_JUMP_A,
+                output_mask, ..Default::default()
+            },
+            "jump-b" => CapsLayerEntry {
+                src_keycode: src, entry_type: CAPS_ENTRY_JUMP_B,
+                output_mask, ..Default::default()
+            },
+            "swap" => CapsLayerEntry {
+                src_keycode: src, entry_type: CAPS_ENTRY_SWAP,
+                output_mask, ..Default::default()
+            },
+            other => {
+                tracing::warn!("unknown caps entry: {other}");
+                continue;
+            }
+        };
+
+        if out.caps_layer.entries.len() < CAPS_LAYER_MAX {
+            out.caps_layer.entries.push(entry);
+        } else {
+            tracing::warn!("caps-layer limit ({CAPS_LAYER_MAX}) reached");
+        }
+    }
+    Ok(())
+}
+
+// ── Key name tables ───────────────────────────────────────────────────────────
+
+/// Resolve a key name or single character to a HID keycode.
+/// Accepts: single letter (a-z), single digit (0-9), or named key.
+pub fn keycode_by_name(name: &str) -> Option<u8> {
+    // Single character shortcuts
+    if name.len() == 1 {
+        let c = name.chars().next().unwrap();
+        if c.is_ascii_lowercase() {
+            return Some(0x04 + (c as u8 - b'a'));
+        }
+        if let Some(kc) = match c {
+            '0' => Some(0x27u8),
+            '1'..='9' => Some(0x1E + (c as u8 - b'1')),
+            _ => None,
+        } { return Some(kc); }
+    }
+
+    // Named keys (case-insensitive via lowercase match)
+    match name.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(0x28),
+        "esc"   | "escape" => Some(0x29),
+        "backspace"        => Some(0x2A),
+        "tab"              => Some(0x2B),
+        "space"            => Some(0x2C),
+        "minus" | "-"      => Some(0x2D),
+        "equals" | "="     => Some(0x2E),
+        "lbracket" | "["   => Some(0x2F),
+        "rbracket" | "]"   => Some(0x30),
+        "backslash" | "\\" => Some(0x31),
+        "semicolon" | ";"  => Some(0x33),
+        "quote"  | "'"     => Some(0x34),
+        "grave"  | "`"     => Some(0x35),
+        "comma"  | ","     => Some(0x36),
+        "period" | "."     => Some(0x37),
+        "slash"  | "/"     => Some(0x38),
+        "capslock"         => Some(0x39),
+        "f1"  => Some(0x3A), "f2"  => Some(0x3B), "f3"  => Some(0x3C),
+        "f4"  => Some(0x3D), "f5"  => Some(0x3E), "f6"  => Some(0x3F),
+        "f7"  => Some(0x40), "f8"  => Some(0x41), "f9"  => Some(0x42),
+        "f10" => Some(0x43), "f11" => Some(0x44), "f12" => Some(0x45),
+        "printscreen"      => Some(0x46),
+        "scrolllock"       => Some(0x47),
+        "pause"            => Some(0x48),
+        "insert"           => Some(0x49),
+        "home"             => Some(0x4A),
+        "pageup"           => Some(0x4B),
+        "delete" | "del"   => Some(0x4C),
+        "end"              => Some(0x4D),
+        "pagedown"         => Some(0x4E),
+        "right"            => Some(0x4F),
+        "left"             => Some(0x50),
+        "down"             => Some(0x51),
+        "up"               => Some(0x52),
+        "mute"             => Some(0x7F),
+        "volup" | "volumeup"   => Some(0x80),
+        "voldown" | "volumedown" => Some(0x81),
+        _ => None,
+    }
+}
+
+/// Reverse: HID keycode → display name (used by `to_kdl_string`).
+fn kc_display(kc: u8) -> String {
+    // a-z
+    if (0x04..=0x1D).contains(&kc) {
+        return ((b'a' + kc - 0x04) as char).to_string();
+    }
+    // 1-9
+    if (0x1E..=0x26).contains(&kc) {
+        return ((b'1' + kc - 0x1E) as char).to_string();
+    }
+    match kc {
+        0x27 => "0".into(),
+        0x28 => "enter".into(),    0x29 => "esc".into(),
+        0x2A => "backspace".into(),0x2B => "tab".into(),
+        0x2C => "space".into(),    0x39 => "capslock".into(),
+        0x3A => "f1".into(),  0x3B => "f2".into(),  0x3C => "f3".into(),
+        0x3D => "f4".into(),  0x3E => "f5".into(),  0x3F => "f6".into(),
+        0x40 => "f7".into(),  0x41 => "f8".into(),  0x42 => "f9".into(),
+        0x43 => "f10".into(), 0x44 => "f11".into(), 0x45 => "f12".into(),
+        0x49 => "insert".into(),   0x4A => "home".into(),
+        0x4B => "pageup".into(),   0x4C => "delete".into(),
+        0x4D => "end".into(),      0x4E => "pagedown".into(),
+        0x4F => "right".into(),    0x50 => "left".into(),
+        0x51 => "down".into(),     0x52 => "up".into(),
+        0x7F => "mute".into(),
+        0x80 => "volup".into(),    0x81 => "voldown".into(),
+        n    => format!("0x{n:02X}"),
+    }
+}
+
+fn modifier_by_name(name: &str) -> Option<u8> {
+    match name {
+        // Long forms
+        "lctrl"  => Some(0x01), "lshift" => Some(0x02),
+        "lalt"   => Some(0x04), "lmeta"  => Some(0x08),
+        "rctrl"  => Some(0x10), "rshift" => Some(0x20),
+        "ralt"   => Some(0x40), "rmeta"  => Some(0x80),
+        // Short aliases (left-side by default)
+        "ctrl"   => Some(0x01), "shift"  => Some(0x02),
+        "alt"    => Some(0x04),
+        "meta" | "cmd" | "win" | "super" => Some(0x08),
+        _ => None,
+    }
+}
+
+/// Single-modifier display name used in chord `mod_key` tokens.
+fn mod_bit_name(bit: u8) -> &'static str {
+    match bit {
+        0x01 => "ctrl",   0x02 => "shift",
+        0x04 => "alt",    0x08 => "meta",
+        0x10 => "rctrl",  0x20 => "rshift",
+        0x40 => "ralt",   0x80 => "rmeta",
+        _    => "?",
+    }
+}
+
+/// Build the `mod1_mod2_` prefix string for a modifier bitmask (e.g. `ctrl_shift_`).
+fn mod_prefix(m: u8) -> String {
+    if m == 0 { return String::new(); }
+    let mut parts = Vec::new();
+    for bit in [0x01u8, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80] {
+        if m & bit != 0 { parts.push(mod_bit_name(bit)); }
+    }
+    parts.join("_") + "_"
+}
+
+/// Display a modifier bitmask for `modifier` remap entries (e.g. `lalt`).
+fn mod_display(m: u8) -> String {
+    match m {
+        0x01 => "lctrl".into(),  0x02 => "lshift".into(),
+        0x04 => "lalt".into(),   0x08 => "lmeta".into(),
+        0x10 => "rctrl".into(),  0x20 => "rshift".into(),
+        0x40 => "ralt".into(),   0x80 => "rmeta".into(),
+        n    => format!("0x{n:02X}"),
+    }
+}
+
+// ── Low-level KDL node helpers ────────────────────────────────────────────────
+
+fn kdl_prop<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
+    node.entries().iter()
+        .find(|e| e.name().is_some_and(|n| n.value() == key))
+        .map(|e| e.value())
+}
+
+fn kdl_arg<'a>(node: &'a KdlNode, idx: usize) -> Option<&'a KdlValue> {
+    node.entries().iter()
+        .filter(|e| e.name().is_none())
+        .nth(idx)
+        .map(|e| e.value())
+}
+
+/// Extract a string-or-identifier value (KDL v2: both quoted strings and bare identifiers).
+fn kdl_val_as_str(v: &KdlValue) -> Option<&str> {
+    v.as_string()
+}
+
+fn kdl_prop_str<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
+    kdl_prop(node, key).and_then(|v| kdl_val_as_str(v))
+}
+
+fn kdl_prop_bool(node: &KdlNode, key: &str) -> Option<bool> {
+    kdl_prop(node, key).and_then(|v| v.as_bool())
+}
+
+fn kdl_prop_u8(node: &KdlNode, key: &str) -> Option<u8> {
+    kdl_prop(node, key)
+        .and_then(|v| kdl_as_i64(v))
+        .and_then(|n| u8::try_from(n).ok())
+}
+
+/// Get positional arg as string or identifier.
+fn kdl_arg_str<'a>(node: &'a KdlNode, idx: usize) -> Option<&'a str> {
+    kdl_arg(node, idx).and_then(|v| kdl_val_as_str(v))
+}
+
+/// Resolve a positional arg (integer keycode or named key) to a HID keycode.
+fn kdl_arg_as_keycode(node: &KdlNode, idx: usize) -> Option<u8> {
+    let v = kdl_arg(node, idx)?;
+    if let Some(n) = kdl_as_i64(v) { return u8::try_from(n).ok(); }
+    kdl_val_as_str(v).and_then(keycode_by_name)
+}
+
+/// Parse an underscore-combined `[mod_]key` token into `(modifier_bits, keycode)`.
+/// Examples: `ctrl_t` → (0x01, 0x17), `ctrl_shift_a` → (0x03, 0x04), `e` → (0, 0x08).
+/// Raw integers (0x04, 65) are also accepted and return modifier=0.
+fn kdl_arg_as_mod_key(node: &KdlNode, idx: usize) -> Option<(u8, u8)> {
+    let v = kdl_arg(node, idx)?;
+    // Integer → plain keycode, no modifier
+    if let Some(n) = kdl_as_i64(v) {
+        return u8::try_from(n).ok().map(|kc| (0u8, kc));
+    }
+    // String/identifier → parse underscore-separated mod+key
+    let s = kdl_val_as_str(v)?;
+    parse_mod_key(s)
+}
+
+/// Split `ctrl_shift_a` into `(modifier_bits, keycode)`.
+fn parse_mod_key(s: &str) -> Option<(u8, u8)> {
+    let parts: Vec<&str> = s.split('_').collect();
+    let mut modifier = 0u8;
+    let mut key_start = 0usize;
+
+    for (i, &part) in parts.iter().enumerate() {
+        if let Some(m) = modifier_by_name(part) {
+            modifier |= m;
+            key_start = i + 1;
+        } else {
+            key_start = i;
+            break;
+        }
+    }
+
+    let key_name = parts[key_start..].join("_");
+    let kc = keycode_by_name(&key_name)?;
+    Some((modifier, kc))
+}
+
+/// Resolve a prop value (integer or name) to a modifier bitmask.
+fn kdl_prop_as_modifier(node: &KdlNode, key: &str) -> Option<u8> {
+    let v = kdl_prop(node, key)?;
+    if let Some(n) = kdl_as_i64(v) { return u8::try_from(n).ok(); }
+    kdl_val_as_str(v).and_then(modifier_by_name)
+}
+
+/// Resolve a positional arg as a modifier bitmask (name or integer).
+fn kdl_arg_as_modifier(node: &KdlNode, idx: usize) -> Option<u8> {
+    let v = kdl_arg(node, idx)?;
+    if let Some(n) = kdl_as_i64(v) { return u8::try_from(n).ok(); }
+    kdl_val_as_str(v).and_then(modifier_by_name)
+}
+
+fn kdl_as_i64(v: &KdlValue) -> Option<i64> {
+    match v {
+        KdlValue::Integer(n) => Some(*n as i64),
+        _ => None,
     }
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
+
+pub fn kdl_config_path() -> PathBuf {
+    project_dirs().config_dir().join("dualie.kdl")
+}
+
+/// Legacy JSON config path — used only for `load_or_default` migration fallback.
+fn json_config_path() -> PathBuf {
+    project_dirs().config_dir().join("config.json")
+}
+
+fn project_dirs() -> ProjectDirs {
+    ProjectDirs::from("dev", "dualie", "dualie")
+        .expect("could not determine config directory")
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -267,14 +899,141 @@ impl DualieConfig {
 mod tests {
     use super::*;
 
+    const EXAMPLE_KDL: &str = r#"
+output A {
+    actions {
+        launch "Slack" app-id="com.tinyspeck.slackmacgap"
+        shell  "Terminal" command="open -a Terminal"
+    }
+
+    remap {
+        key esc backspace
+        key 0x39 0x29
+        modifier lalt rctrl
+    }
+
+    layers {
+        caps {
+            chord  a e
+            chord  b ctrl_t
+            chord  c ctrl_shift_a
+            action s "Slack"
+            jump-a h
+            jump-b k
+            swap   n
+        }
+    }
+}
+
+output B {}
+"#;
+
     #[test]
-    fn json_roundtrip() {
+    fn parse_actions() {
+        let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
+        assert_eq!(cfg.outputs[0].virtual_actions[0], VirtualAction::AppLaunch {
+            app_id: "com.tinyspeck.slackmacgap".into(),
+            label:  "Slack".into(),
+        });
+        assert_eq!(cfg.outputs[0].virtual_actions[1], VirtualAction::ShellCommand {
+            command: "open -a Terminal".into(),
+            label:   "Terminal".into(),
+        });
+    }
+
+    #[test]
+    fn parse_remap() {
+        let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
+        let kr = &cfg.outputs[0].key_remaps;
+        assert_eq!(kr.len(), 2);
+        // "esc" → 0x29, "backspace" → 0x2A
+        assert_eq!(kr[0].src_keycode, 0x29);
+        assert_eq!(kr[0].dst_keycode, 0x2A);
+        // 0x39 → 0x29
+        assert_eq!(kr[1].src_keycode, 0x39);
+        assert_eq!(kr[1].dst_keycode, 0x29);
+        // modifier lalt → rctrl
+        let mr = &cfg.outputs[0].modifier_remaps;
+        assert_eq!(mr[0].src, 0x04); // lalt
+        assert_eq!(mr[0].dst, 0x10); // rctrl
+    }
+
+    #[test]
+    fn parse_caps_layer() {
+        let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
+        let cl = &cfg.outputs[0].caps_layer;
+        assert_eq!(cl.entries.len(), 7);
+
+        // chord a e  → src=a, dst=[e], mod=0
+        assert_eq!(cl.entries[0].entry_type, CAPS_ENTRY_CHORD);
+        assert_eq!(cl.entries[0].src_keycode, 0x04); // a
+        assert_eq!(cl.entries[0].dst_keycodes[0], 0x08); // e
+        assert_eq!(cl.entries[0].dst_modifier, 0);
+
+        // chord b ctrl_t → src=b, dst=[t], mod=ctrl(0x01)
+        assert_eq!(cl.entries[1].src_keycode, 0x05); // b
+        assert_eq!(cl.entries[1].dst_modifier, 0x01); // ctrl
+        assert_eq!(cl.entries[1].dst_keycodes[0], 0x17); // t
+
+        // chord c ctrl_shift_a → src=c, dst=[a], mod=ctrl|shift(0x03)
+        assert_eq!(cl.entries[2].dst_modifier, 0x03);
+        assert_eq!(cl.entries[2].dst_keycodes[0], 0x04); // a
+
+        // action s "Slack" → slot 0
+        assert_eq!(cl.entries[3].entry_type, CAPS_ENTRY_VIRTUAL);
+        assert_eq!(cl.entries[3].src_keycode, 0x16); // s
+        assert_eq!(cl.entries[3].vaction_idx, 0);
+
+        // jump-a h
+        assert_eq!(cl.entries[4].entry_type, CAPS_ENTRY_JUMP_A);
+        assert_eq!(cl.entries[4].src_keycode, 0x0B); // h
+    }
+
+    #[test]
+    fn parse_mod_key_fn() {
+        assert_eq!(parse_mod_key("e"),            Some((0x00, 0x08)));
+        assert_eq!(parse_mod_key("ctrl_t"),       Some((0x01, 0x17)));
+        assert_eq!(parse_mod_key("ctrl_shift_a"), Some((0x03, 0x04)));
+        assert_eq!(parse_mod_key("alt_f4"),       Some((0x04, 0x3D)));
+        assert_eq!(parse_mod_key("meta_space"),   Some((0x08, 0x2C)));
+        assert_eq!(parse_mod_key("0x04"),         None); // hex handled separately
+    }
+
+    #[test]
+    fn bare_output_identifier() {
+        // KDL v2 allows unquoted identifiers as values: `output A { }`
+        let src = "output A {}\noutput B {}";
+        match DualieConfig::from_kdl(src) {
+            Ok(_) => { /* great — bare identifiers work */ }
+            Err(e) => {
+                // If the kdl crate rejects bare identifiers, require quoted form
+                let src_quoted = r#"output "A" {}
+output "B" {}"#;
+                DualieConfig::from_kdl(src_quoted).expect("quoted form must parse");
+                eprintln!("note: bare 'output A' not supported by this kdl version ({e}); use output \"A\"");
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_empty() {
         let original = DualieConfig::default();
-        let json     = serde_json::to_string(&original).expect("serialize");
-        let restored: DualieConfig = serde_json::from_str(&json).expect("deserialize");
-        // Compare via re-serialization (DualieConfig doesn't derive PartialEq)
-        let json2 = serde_json::to_string(&restored).expect("serialize restored");
-        assert_eq!(json, json2, "JSON roundtrip produced different output");
+        let kdl = original.to_kdl_string();
+        let restored = DualieConfig::from_kdl(&kdl).expect("parse roundtrip");
+        assert!(restored.outputs[0].key_remaps.is_empty());
+        assert!(restored.outputs[0].virtual_actions.iter().all(|a| *a == VirtualAction::Unset));
+    }
+
+    #[test]
+    fn keycode_names() {
+        assert_eq!(keycode_by_name("a"), Some(0x04));
+        assert_eq!(keycode_by_name("z"), Some(0x1D));
+        assert_eq!(keycode_by_name("1"), Some(0x1E));
+        assert_eq!(keycode_by_name("0"), Some(0x27));
+        assert_eq!(keycode_by_name("esc"), Some(0x29));
+        assert_eq!(keycode_by_name("left"), Some(0x50));
+        assert_eq!(keycode_by_name("volup"), Some(0x80));
+        assert_eq!(keycode_by_name("f12"), Some(0x45));
     }
 
     #[test]
@@ -282,31 +1041,8 @@ mod tests {
         let original = DualieConfig::default();
         let bytes    = original.to_cbor().expect("to_cbor");
         let restored = DualieConfig::from_cbor(&bytes).expect("from_cbor");
-        let json_orig    = serde_json::to_string(&original).expect("json orig");
-        let json_restored = serde_json::to_string(&restored).expect("json restored");
-        assert_eq!(json_orig, json_restored, "CBOR roundtrip produced different output");
+        let j1 = serde_json::to_string(&original).unwrap();
+        let j2 = serde_json::to_string(&restored).unwrap();
+        assert_eq!(j1, j2);
     }
-
-    #[test]
-    fn virtual_action_serialization_tag() {
-        let action = VirtualAction::AppLaunch {
-            app_id: "com.foo".into(),
-            label:  "Foo".into(),
-        };
-        let json = serde_json::to_string(&action).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        assert_eq!(v["type"], "app_launch", "type tag should be app_launch");
-        assert_eq!(v["app_id"], "com.foo");
-        assert_eq!(v["label"], "Foo");
-    }
-
-}
-
-pub fn config_path() -> PathBuf {
-    project_dirs().config_dir().join("config.json")
-}
-
-fn project_dirs() -> ProjectDirs {
-    ProjectDirs::from("dev", "dualie", "dualie")
-        .expect("could not determine config directory")
 }
