@@ -32,6 +32,9 @@ pub struct FileChunk {
     pub data:        Vec<u8>,
     /// When `offset + data.len() == total_size` this is the final chunk.
     pub total_size:  u64,
+    /// Last-modified epoch-ms of the source file (sender's mtime).
+    /// Used by the receiver for LWW conflict resolution.
+    pub modified_ms: u64,
 }
 
 // ── RP2040 ↔ Daemon message ───────────────────────────────────────────────────

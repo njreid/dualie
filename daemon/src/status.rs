@@ -43,13 +43,21 @@ fn status_json() -> String {
     } else {
         "disconnected"
     };
+    let git_pending = crate::git_sync::GIT_PENDING.load(std::sync::atomic::Ordering::Relaxed);
+    let repo_dir = crate::git_sync::REPO_DIR
+        .get()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
 
     format!(
-        "{{\"version\":{version:?},\"config\":{config:?},\"serial\":{serial:?},\"pid\":{pid}}}\n",
-        version = env!("CARGO_PKG_VERSION"),
-        config  = kdl_config_path().display().to_string(),
-        serial  = serial,
-        pid     = std::process::id(),
+        "{{\"version\":{version:?},\"config\":{config:?},\"serial\":{serial:?},\
+         \"git_pending\":{git_pending},\"repo_dir\":{repo_dir:?},\"pid\":{pid}}}\n",
+        version     = env!("CARGO_PKG_VERSION"),
+        config      = kdl_config_path().display().to_string(),
+        serial      = serial,
+        git_pending = git_pending,
+        repo_dir    = repo_dir,
+        pid         = std::process::id(),
     )
 }
 

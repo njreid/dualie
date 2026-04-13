@@ -4,6 +4,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Number of virtual action slots (0-31).
@@ -75,11 +76,12 @@ fn default_output_mask() -> u8 { 3 }
 
 pub const CAPS_LAYER_MAX: usize = 32;
 
-pub const CAPS_ENTRY_CHORD:   u8 = 0;
-pub const CAPS_ENTRY_VIRTUAL: u8 = 1;
-#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_A: u8 = 2;
-#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_B: u8 = 3;
-#[allow(dead_code)] pub const CAPS_ENTRY_SWAP:   u8 = 4;
+pub const CAPS_ENTRY_CHORD:     u8 = 0;
+pub const CAPS_ENTRY_VIRTUAL:   u8 = 1;
+#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_A:     u8 = 2;
+#[allow(dead_code)] pub const CAPS_ENTRY_JUMP_B:     u8 = 3;
+#[allow(dead_code)] pub const CAPS_ENTRY_SWAP:       u8 = 4;
+#[allow(dead_code)] pub const CAPS_ENTRY_CLIP_PULL:  u8 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsLayerEntry {
@@ -154,18 +156,71 @@ impl Default for OutputDaemonConfig {
     }
 }
 
+// ── Sync config ───────────────────────────────────────────────────────────────
+
+/// Which app configs and manual file pairs to sync across machines.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SyncConfig {
+    /// Registry app names explicitly added by the user via the TUI.
+    /// Each name is looked up in the app registry at sync time.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    /// Manual file pairs: `pair "~/.tmux.conf" "~/.tmux.conf"`.
+    #[serde(default)]
+    pub pairs: Vec<ManualSyncPair>,
+}
+
+/// A manually specified file pair for syncing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ManualSyncPair {
+    pub local:  String,
+    pub remote: String,
+}
+
+impl SyncConfig {
+    /// Add an app name if not already present.
+    pub fn add_app(&mut self, name: &str) {
+        if !self.apps.iter().any(|a| a == name) {
+            self.apps.push(name.to_owned());
+        }
+    }
+
+    /// Remove an app name; returns true if it was present.
+    pub fn remove_app(&mut self, name: &str) -> bool {
+        let before = self.apps.len();
+        self.apps.retain(|a| a != name);
+        self.apps.len() < before
+    }
+}
+
+// ── Git sync config ───────────────────────────────────────────────────────────
+
+/// Git-backed config sync settings (stored in `dualie.kdl`, shared across machines).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct GitSyncConfig {
+    /// Remote URL, e.g. `git@github.com:user/configs.git`.
+    #[serde(default)]
+    pub remote: Option<String>,
+}
+
 // ── Top-level daemon config ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DualieConfig {
     #[serde(default)]
     pub outputs: [OutputDaemonConfig; 2],
+    #[serde(default)]
+    pub sync: SyncConfig,
+    #[serde(default)]
+    pub git_sync: GitSyncConfig,
 }
 
 impl Default for DualieConfig {
     fn default() -> Self {
         Self {
-            outputs: [OutputDaemonConfig::default(), OutputDaemonConfig::default()],
+            outputs:  [OutputDaemonConfig::default(), OutputDaemonConfig::default()],
+            sync:     SyncConfig::default(),
+            git_sync: GitSyncConfig::default(),
         }
     }
 }
@@ -269,6 +324,22 @@ impl DualieConfig {
                     };
                     if let Some(children) = node.children() {
                         parse_output(children, &mut cfg.outputs[idx])?;
+                    }
+                }
+                "sync" => {
+                    if let Some(children) = node.children() {
+                        parse_sync(children, &mut cfg.sync)?;
+                    }
+                }
+                "git-sync" => {
+                    if let Some(children) = node.children() {
+                        for child in children.nodes() {
+                            if child.name().value() == "remote" {
+                                if let Some(s) = kdl_arg_str(child, 0) {
+                                    cfg.git_sync.remote = Some(s.to_owned());
+                                }
+                            }
+                        }
                     }
                 }
                 other => tracing::warn!("unknown top-level node: {other}"),
@@ -396,6 +467,23 @@ impl DualieConfig {
             s.push_str("}\n\n");
         }
 
+        // git-sync block
+        if let Some(remote) = &self.git_sync.remote {
+            s.push_str(&format!("git-sync {{\n    remote {remote:?}\n}}\n\n"));
+        }
+
+        // sync block
+        if !self.sync.apps.is_empty() || !self.sync.pairs.is_empty() {
+            s.push_str("sync {\n");
+            for app in &self.sync.apps {
+                s.push_str(&format!("    app {app:?}\n"));
+            }
+            for pair in &self.sync.pairs {
+                s.push_str(&format!("    pair {:?} {:?}\n", pair.local, pair.remote));
+            }
+            s.push_str("}\n");
+        }
+
         s
     }
 
@@ -435,6 +523,7 @@ impl DualieConfig {
                                 Ok(cfg) => {
                                     tracing::info!("config reloaded");
                                     let _ = tx.send(cfg);
+                                    crate::git_sync::trigger_commit();
                                 }
                                 Err(e) => tracing::error!("config reload: {e:#}"),
                             }
@@ -448,6 +537,31 @@ impl DualieConfig {
 
         Ok(rx)
     }
+}
+
+// ── Sync block parser ─────────────────────────────────────────────────────────
+
+fn parse_sync(doc: &KdlDocument, sync: &mut SyncConfig) -> Result<()> {
+    for node in doc.nodes() {
+        match node.name().value() {
+            "app" => {
+                let name = kdl_arg_str(node, 0)
+                    .ok_or_else(|| anyhow::anyhow!("sync app: requires a name argument"))?;
+                sync.add_app(name);
+            }
+            "pair" => {
+                let local = kdl_arg_str(node, 0)
+                    .ok_or_else(|| anyhow::anyhow!("sync pair: requires local path"))?
+                    .to_owned();
+                let remote = kdl_arg_str(node, 1)
+                    .ok_or_else(|| anyhow::anyhow!("sync pair: requires remote path"))?
+                    .to_owned();
+                sync.pairs.push(ManualSyncPair { local, remote });
+            }
+            other => tracing::warn!("sync: unknown node {other:?}"),
+        }
+    }
+    Ok(())
 }
 
 // ── Output block parser ───────────────────────────────────────────────────────
@@ -620,6 +734,10 @@ fn parse_caps(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
             },
             "swap" => CapsLayerEntry {
                 src_keycode: src, entry_type: CAPS_ENTRY_SWAP,
+                output_mask, ..Default::default()
+            },
+            "clip-pull" => CapsLayerEntry {
+                src_keycode: src, entry_type: CAPS_ENTRY_CLIP_PULL,
                 output_mask, ..Default::default()
             },
             other => {
@@ -883,6 +1001,11 @@ pub fn kdl_config_path() -> PathBuf {
     project_dirs().config_dir().join("dualie.kdl")
 }
 
+/// Path of `local.kdl` — machine-local overrides, never committed to git.
+pub fn local_config_path() -> PathBuf {
+    project_dirs().config_dir().join("local.kdl")
+}
+
 /// Legacy JSON config path — used only for `load_or_default` migration fallback.
 fn json_config_path() -> PathBuf {
     project_dirs().config_dir().join("config.json")
@@ -891,6 +1014,106 @@ fn json_config_path() -> PathBuf {
 fn project_dirs() -> ProjectDirs {
     ProjectDirs::from("dev", "dualie", "dualie")
         .expect("could not determine config directory")
+}
+
+// ── Local config (machine-specific, not git-tracked) ─────────────────────────
+
+/// Machine-local settings parsed from `local.kdl`.
+///
+/// ```kdl
+/// local {
+///     machine-name "mbp-work"
+///
+///     git-sync {
+///         repo-path "~/src/dotfiles"   // optional; overrides platform default
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct LocalConfig {
+    /// Human-readable machine name embedded in git commit messages.
+    pub machine_name: String,
+    /// Override for the git repo directory.  `None` → use `git_sync::default_repo_dir()`.
+    pub repo_path: Option<PathBuf>,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self { machine_name: hostname_fallback(), repo_path: None }
+    }
+}
+
+impl LocalConfig {
+    /// Load `local.kdl`, falling back to a hostname-derived default if absent.
+    pub fn load() -> Self {
+        let path = local_config_path();
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(src) => Self::from_kdl(&src).unwrap_or_else(|e| {
+                tracing::warn!("local.kdl parse error: {e}");
+                Self::default()
+            }),
+            Err(e) => {
+                tracing::warn!("reading local.kdl: {e}");
+                Self::default()
+            }
+        }
+    }
+
+    pub(crate) fn from_kdl(src: &str) -> Result<Self> {
+        let doc = src.parse::<KdlDocument>()
+            .map_err(|e| anyhow::anyhow!("{:?}", miette::Report::new(e)))?;
+
+        let mut cfg = Self::default();
+
+        for node in doc.nodes() {
+            if node.name().value() != "local" {
+                continue;
+            }
+            let Some(children) = node.children() else { continue };
+            for child in children.nodes() {
+                match child.name().value() {
+                    "machine-name" => {
+                        if let Some(s) = kdl_arg_str(child, 0) {
+                            cfg.machine_name = s.to_owned();
+                        }
+                    }
+                    "git-sync" => {
+                        if let Some(gc) = child.children() {
+                            for g in gc.nodes() {
+                                if g.name().value() == "repo-path" {
+                                    if let Some(s) = kdl_arg_str(g, 0) {
+                                        cfg.repo_path = Some(expand_tilde(s));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(cfg)
+    }
+}
+
+fn hostname_fallback() -> String {
+    let raw = gethostname::gethostname();
+    let lossy = raw.to_string_lossy().into_owned();
+    // Strip FQDN suffix — keep only the short hostname.
+    lossy.split('.').next().unwrap_or(&lossy).to_owned()
+}
+
+fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(dirs) = directories::UserDirs::new() {
+            return dirs.home_dir().join(rest);
+        }
+    }
+    PathBuf::from(s)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1045,4 +1268,131 @@ output "B" {}"#;
         let j2 = serde_json::to_string(&restored).unwrap();
         assert_eq!(j1, j2);
     }
+
+    #[test]
+    fn to_kdl_string_roundtrip() {
+        // Parse the full example, serialise to KDL, re-parse — structures must match.
+        let original = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
+        let kdl = original.to_kdl_string();
+        let restored = DualieConfig::from_kdl(&kdl)
+            .unwrap_or_else(|e| panic!("re-parse after to_kdl_string failed:\n{e}\n\nKDL:\n{kdl}"));
+
+        // Key remaps preserved
+        assert_eq!(
+            original.outputs[0].key_remaps.len(),
+            restored.outputs[0].key_remaps.len(),
+            "key remap count mismatch"
+        );
+        for (a, b) in original.outputs[0].key_remaps.iter()
+            .zip(restored.outputs[0].key_remaps.iter())
+        {
+            assert_eq!(a.src_keycode, b.src_keycode, "src_keycode mismatch");
+            assert_eq!(a.dst_keycode, b.dst_keycode, "dst_keycode mismatch");
+        }
+
+        // Modifier remaps preserved
+        assert_eq!(
+            original.outputs[0].modifier_remaps.len(),
+            restored.outputs[0].modifier_remaps.len(),
+        );
+
+        // Caps layer entries preserved
+        assert_eq!(
+            original.outputs[0].caps_layer.entries.len(),
+            restored.outputs[0].caps_layer.entries.len(),
+            "caps layer entry count mismatch"
+        );
+        for (a, b) in original.outputs[0].caps_layer.entries.iter()
+            .zip(restored.outputs[0].caps_layer.entries.iter())
+        {
+            assert_eq!(a.entry_type,  b.entry_type,  "entry_type mismatch");
+            assert_eq!(a.src_keycode, b.src_keycode, "src_keycode mismatch");
+        }
+
+        // Action labels preserved
+        let orig_labels: Vec<_> = original.outputs[0].virtual_actions.iter()
+            .filter_map(|a| a.label()).collect();
+        let rest_labels: Vec<_> = restored.outputs[0].virtual_actions.iter()
+            .filter_map(|a| a.label()).collect();
+        assert_eq!(orig_labels, rest_labels, "action labels mismatch");
+    }
+
+    // ── git-sync block ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_git_sync_remote() {
+        let src = r#"
+git-sync {
+    remote "git@github.com:user/configs.git"
+}
+output A {}
+output B {}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        assert_eq!(
+            cfg.git_sync.remote.as_deref(),
+            Some("git@github.com:user/configs.git"),
+        );
+    }
+
+    #[test]
+    fn git_sync_absent_defaults_to_none() {
+        let cfg = DualieConfig::from_kdl("output A {}\noutput B {}").expect("parse");
+        assert!(cfg.git_sync.remote.is_none());
+    }
+
+    #[test]
+    fn git_sync_roundtrip() {
+        let mut cfg = DualieConfig::default();
+        cfg.git_sync.remote = Some("git@github.com:user/configs.git".into());
+        let kdl = cfg.to_kdl_string();
+        let restored = DualieConfig::from_kdl(&kdl).expect("re-parse");
+        assert_eq!(cfg.git_sync, restored.git_sync);
+    }
+
+    // ── LocalConfig ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn local_config_parse_machine_name() {
+        let src = r#"local { machine-name "mbp-work" }"#;
+        let lc = LocalConfig::from_kdl(src).expect("parse");
+        assert_eq!(lc.machine_name, "mbp-work");
+        assert!(lc.repo_path.is_none());
+    }
+
+    #[test]
+    fn local_config_parse_repo_path() {
+        let src = r#"
+local {
+    machine-name "dev"
+    git-sync {
+        repo-path "/tmp/dotfiles"
+    }
+}
+"#;
+        let lc = LocalConfig::from_kdl(src).expect("parse");
+        assert_eq!(lc.machine_name, "dev");
+        assert_eq!(lc.repo_path.as_deref(), Some(std::path::Path::new("/tmp/dotfiles")));
+    }
+
+    #[test]
+    fn local_config_empty_falls_back_to_hostname() {
+        let lc = LocalConfig::from_kdl("").expect("parse");
+        // hostname_fallback never returns an empty string
+        assert!(!lc.machine_name.is_empty());
+    }
+
+    #[test]
+    fn unknown_output_label_errors() {
+        let src = r#"output C {}"#;
+        assert!(DualieConfig::from_kdl(src).is_err());
+    }
+
+    #[test]
+    fn invalid_kdl_syntax_errors() {
+        // Missing closing brace
+        let src = "output A {\n    remap {\n        key esc backspace\n";
+        assert!(DualieConfig::from_kdl(src).is_err());
+    }
+
 }

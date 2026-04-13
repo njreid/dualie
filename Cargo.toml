@@ -1,5 +1,5 @@
 [workspace]
-members  = ["daemon", "proto", "hub"]
+members  = ["daemon", "proto", "hub", "tui"]
 resolver = "2"
 
 [workspace.dependencies]

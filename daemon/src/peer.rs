@@ -72,7 +72,7 @@ async fn tx_task(mut writer: SerialPeerWriter, mut rx: mpsc::Receiver<DualieMess
 
 // ── Inbound dispatch ──────────────────────────────────────────────────────────
 
-async fn dispatch(msg: DualieMessage) {
+async fn dispatch(msg: DualieMessage, client: &SerialClient) {
     match msg {
         DualieMessage::Ping => {}
 
@@ -89,17 +89,36 @@ async fn dispatch(msg: DualieMessage) {
 
         DualieMessage::VirtualAction { slot } => {
             info!(slot, "virtual action from RP2040");
-            // TODO (Phase 3): look up slot in config and execute action
         }
 
         DualieMessage::ActiveOutput { output } => {
             info!(output, "active output changed by RP2040");
-            // TODO (Phase 3): notify intercept layer via SerialClient
         }
 
         DualieMessage::ClipboardPush(content) => {
-            info!(len = content.text.len(), "clipboard received from RP2040");
-            // TODO (Phase 6): write to OS clipboard via arboard
+            info!(len = content.text.len(), "clipboard received — writing to OS clipboard");
+            let text = content.text.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || crate::clipboard::write_text(&text)).await {
+                warn!("clipboard write error: {e}");
+            }
+        }
+
+        DualieMessage::ClipboardPull => {
+            info!("clipboard pull requested — reading OS clipboard");
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || {
+                match crate::clipboard::read_text() {
+                    Ok(text) => {
+                        let msg = DualieMessage::ClipboardPush(dualie_proto::ClipboardText { text });
+                        tokio::runtime::Handle::current().block_on(client.send(msg));
+                    }
+                    Err(e) => warn!("clipboard read error: {e}"),
+                }
+            });
+        }
+
+        DualieMessage::SyncChunk(_) | DualieMessage::SyncAck { .. } => {
+            crate::file_sync::handle_incoming(msg);
         }
 
         DualieMessage::Error { message } => {
@@ -129,7 +148,7 @@ async fn run_once(serial_path: &str, client: &SerialClient) -> Result<()> {
 
     loop {
         let msg = reader.recv().await?;
-        dispatch(msg).await;
+        dispatch(msg, client).await;
     }
 }
 

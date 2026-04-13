@@ -1,0 +1,451 @@
+// known_apps.kdl — Dualie built-in app config registry.
+//
+// Each entry declares which config files should be synced across machines.
+// User overrides live in ~/.config/dualie/user_apps.kdl — any entry there
+// completely replaces the matching entry here.
+//
+// Platform keys
+//   linux    Linux only
+//   macos    macOS only
+//   unix     Linux + macOS
+//   all      Every platform
+//
+// Globs are home-relative: "~/" is expanded to the user home directory.
+// Multiple globs per platform are listed as sibling arguments on one node.
+//
+// comment  The line-comment prefix for this app's config format (default "//").
+//          Used to delimit dualie:local-start/end blocks and conflict markers.
+//          Set comment="" for formats with no comment support (plain JSON).
+//
+// macOS note: most modern CLI tools follow XDG (~/.config/) on both Linux and
+// macOS, regardless of whether they were installed via Homebrew.  The exceptions
+// are native macOS GUI apps that use ~/Library/Application Support/ — these are
+// handled with separate macos/linux nodes where needed.
+//
+// Homebrew note: installing via Homebrew does NOT change config paths.  The
+// binary moves to /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel)
+// but config files stay in the user's home directory as documented.
+
+// ── Terminal emulators ────────────────────────────────────────────────────────
+
+app "alacritty" label="Alacritty" {
+    comment "#"
+    unix  "~/.config/alacritty/alacritty.toml"
+          "~/.config/alacritty/themes/**"
+}
+
+app "foot" label="Foot" {
+    comment "#"
+    linux "~/.config/foot/foot.ini"
+          "~/.config/foot/themes/**"
+}
+
+app "ghostty" label="Ghostty" {
+    comment "#"
+    linux "~/.config/ghostty/config"
+    macos "~/Library/Application Support/com.mitchellh.ghostty/config"
+}
+
+app "kitty" label="Kitty" {
+    comment "#"
+    unix  "~/.config/kitty/kitty.conf"
+          "~/.config/kitty/current-theme.conf"
+          "~/.config/kitty/themes/**"
+}
+
+app "rio" label="Rio" {
+    comment "#"
+    unix  "~/.config/rio/config.toml"
+          "~/.config/rio/themes/**/*.toml"
+}
+
+app "wezterm" label="WezTerm" {
+    comment "--"
+    unix  "~/.config/wezterm/wezterm.lua"
+          "~/.config/wezterm/**/*.lua"
+}
+
+// ── Terminal multiplexers ─────────────────────────────────────────────────────
+
+app "tmux" label="tmux" {
+    comment "#"
+    unix  "~/.tmux.conf"
+          "~/.config/tmux/tmux.conf"
+          "~/.config/tmux/conf.d/**"
+}
+
+app "zellij" label="Zellij" {
+    comment "//"
+    unix  "~/.config/zellij/config.kdl"
+          "~/.config/zellij/themes/**/*.kdl"
+          "~/.config/zellij/layouts/**/*.kdl"
+          "~/.config/zellij/plugins/**"
+}
+
+// ── Shells ────────────────────────────────────────────────────────────────────
+
+app "bash" label="Bash" {
+    comment "#"
+    unix  "~/.bashrc"
+          "~/.bash_profile"
+          "~/.bash_aliases"
+}
+
+app "fish" label="Fish Shell" {
+    comment "#"
+    unix  "~/.config/fish/config.fish"
+          "~/.config/fish/functions/**/*.fish"
+          "~/.config/fish/conf.d/**/*.fish"
+          "~/.config/fish/completions/**/*.fish"
+}
+
+app "nushell" label="Nushell" {
+    comment "#"
+    unix  "~/.config/nushell/config.nu"
+          "~/.config/nushell/env.nu"
+          "~/.config/nushell/modules/**/*.nu"
+}
+
+app "zsh" label="Zsh" {
+    comment "#"
+    unix  "~/.zshrc"
+          "~/.zshenv"
+          "~/.zprofile"
+          "~/.config/zsh/**"
+}
+
+// ── Editors ───────────────────────────────────────────────────────────────────
+
+app "emacs" label="Emacs" {
+    comment ";;"
+    unix  "~/.emacs.d/init.el"
+          "~/.emacs.d/config.org"
+          "~/.config/emacs/init.el"
+          "~/.config/emacs/config.org"
+}
+
+app "helix" label="Helix" {
+    comment "#"
+    unix  "~/.config/helix/config.toml"
+          "~/.config/helix/languages.toml"
+          "~/.config/helix/themes/**/*.toml"
+}
+
+app "kakoune" label="Kakoune" {
+    comment "#"
+    unix  "~/.config/kak/kakrc"
+          "~/.config/kak/autoload/**/*.kak"
+          "~/.config/kak/colors/**/*.kak"
+}
+
+app "neovim" label="Neovim" {
+    comment "--"
+    unix  "~/.config/nvim/init.lua"
+          "~/.config/nvim/lua/**/*.lua"
+          "~/.config/nvim/after/**"
+          "~/.config/nvim/ftplugin/**"
+          "~/.config/nvim/snippets/**"
+}
+
+app "vim" label="Vim" {
+    comment "\""
+    unix  "~/.vimrc"
+          "~/.vim/vimrc"
+          "~/.vim/after/**/*.vim"
+          "~/.vim/ftplugin/**/*.vim"
+}
+
+// VS Code / Cursor use JSONC (JSON with comments), so "//" guards work.
+// Snippets and extensions are excluded — extensions are platform-specific.
+app "vscode" label="VS Code" {
+    comment "//"
+    linux "~/.config/Code/User/settings.json"
+          "~/.config/Code/User/keybindings.json"
+          "~/.config/Code/User/snippets/**"
+    macos "~/Library/Application Support/Code/User/settings.json"
+          "~/Library/Application Support/Code/User/keybindings.json"
+          "~/Library/Application Support/Code/User/snippets/**"
+}
+
+app "cursor" label="Cursor" {
+    comment "//"
+    linux "~/.config/Cursor/User/settings.json"
+          "~/.config/Cursor/User/keybindings.json"
+    macos "~/Library/Application Support/Cursor/User/settings.json"
+          "~/Library/Application Support/Cursor/User/keybindings.json"
+}
+
+// ── Prompt & shell UX ─────────────────────────────────────────────────────────
+
+app "atuin" label="Atuin" {
+    comment "#"
+    unix  "~/.config/atuin/config.toml"
+}
+
+app "bat" label="bat" {
+    comment "#"
+    unix  "~/.config/bat/config"
+          "~/.config/bat/themes/**"
+          "~/.config/bat/syntaxes/**"
+}
+
+// direnv: hooks into the shell and loads .envrc in project dirs.
+// The direnvrc (stdlib) and lib/ contain shared helper functions.
+app "direnv" label="direnv" {
+    comment "#"
+    unix  "~/.config/direnv/direnvrc"
+          "~/.config/direnv/direnv.toml"
+          "~/.config/direnv/lib/**/*.sh"
+}
+
+app "eza" label="eza" {
+    comment "#"
+    unix  "~/.config/eza/theme.yml"
+}
+
+// fzf ≥ 0.48 respects $FZF_DEFAULT_OPTS_FILE (defaults to ~/.config/fzf/fzf.conf).
+// Shell integration scripts (generated by `fzf --zsh` etc.) are machine-local.
+app "fzf" label="fzf" {
+    comment "#"
+    unix  "~/.config/fzf/fzf.conf"
+}
+
+app "starship" label="Starship" {
+    comment "#"
+    unix  "~/.config/starship.toml"
+}
+
+// ── File navigation & search ──────────────────────────────────────────────────
+
+// broot uses HJSON (conf.hjson) or TOML (conf.toml) depending on version.
+app "broot" label="broot" {
+    comment "#"
+    unix  "~/.config/broot/conf.toml"
+          "~/.config/broot/conf.hjson"
+          "~/.config/broot/verbs.toml"
+          "~/.config/broot/skins/**"
+}
+
+app "fd" label="fd" {
+    comment "#"
+    unix  "~/.config/fd/ignore"
+          "~/.fdignore"
+}
+
+app "lf" label="lf" {
+    comment "#"
+    unix  "~/.config/lf/lfrc"
+          "~/.config/lf/colors"
+          "~/.config/lf/icons"
+}
+
+app "ranger" label="Ranger" {
+    comment "#"
+    unix  "~/.config/ranger/rc.conf"
+          "~/.config/ranger/commands.py"
+          "~/.config/ranger/scope.sh"
+          "~/.config/ranger/rifle.conf"
+}
+
+app "ripgrep" label="ripgrep" {
+    comment "#"
+    unix  "~/.config/ripgrep/config"
+          "~/.ripgreprc"
+}
+
+app "yazi" label="Yazi" {
+    comment "#"
+    unix  "~/.config/yazi/yazi.toml"
+          "~/.config/yazi/keymap.toml"
+          "~/.config/yazi/theme.toml"
+          "~/.config/yazi/plugins/**"
+          "~/.config/yazi/flavors/**"
+}
+
+// ── Version control ───────────────────────────────────────────────────────────
+
+// Note: do NOT add ~/.ssh or ~/.config/git/credentials to any sync config.
+app "git" label="Git" {
+    comment "#"
+    unix  "~/.gitconfig"
+          "~/.config/git/config"
+          "~/.config/git/ignore"
+          "~/.config/git/attributes"
+}
+
+app "lazygit" label="lazygit" {
+    comment "#"
+    unix  "~/.config/lazygit/config.yml"
+}
+
+// ── Developer tools ───────────────────────────────────────────────────────────
+
+// mise (formerly rtx): polyglot version manager.
+// ~/.tool-versions and per-project .mise.toml are intentionally excluded —
+// those are project-local and shouldn't be machine-synced.
+app "mise" label="mise" {
+    comment "#"
+    unix  "~/.config/mise/config.toml"
+          "~/.config/mise/settings.toml"
+}
+
+// The global ~/.editorconfig applies to any project without a local one.
+app "editorconfig" label="EditorConfig" {
+    comment "#"
+    all   "~/.editorconfig"
+}
+
+// topgrade: runs all system/package manager updates in one command.
+app "topgrade" label="topgrade" {
+    comment "#"
+    unix  "~/.config/topgrade.toml"
+          "~/.config/topgrade/topgrade.toml"
+}
+
+// ── System monitoring ─────────────────────────────────────────────────────────
+
+app "btop" label="btop" {
+    comment "#"
+    unix  "~/.config/btop/btop.conf"
+          "~/.config/btop/themes/**/*.theme"
+}
+
+// bottom (binary: btm): cross-platform htop alternative.
+app "bottom" label="bottom" {
+    comment "#"
+    unix  "~/.config/bottom/bottom.toml"
+}
+
+// ── Containers & Kubernetes ───────────────────────────────────────────────────
+
+// k9s uses ~/Library/Application Support on macOS (uses Go os.UserConfigDir).
+app "k9s" label="k9s" {
+    comment "#"
+    linux "~/.config/k9s/config.yaml"
+          "~/.config/k9s/plugins.yaml"
+          "~/.config/k9s/hotkeys.yaml"
+          "~/.config/k9s/aliases.yaml"
+          "~/.config/k9s/views.yaml"
+          "~/.config/k9s/skins/**"
+    macos "~/Library/Application Support/k9s/config.yaml"
+          "~/Library/Application Support/k9s/plugins.yaml"
+          "~/Library/Application Support/k9s/hotkeys.yaml"
+          "~/Library/Application Support/k9s/aliases.yaml"
+          "~/Library/Application Support/k9s/views.yaml"
+          "~/Library/Application Support/k9s/skins/**"
+}
+
+// lazydocker also uses os.UserConfigDir — ~/Library on macOS.
+app "lazydocker" label="lazydocker" {
+    comment "#"
+    linux "~/.config/lazydocker/config.yml"
+    macos "~/Library/Application Support/lazydocker/config.yml"
+}
+
+// ── macOS window managers & desktop tools ────────────────────────────────────
+
+// AeroSpace: tiling window manager for macOS (i3-inspired).
+app "aerospace" label="AeroSpace" {
+    comment "#"
+    macos "~/.aerospace.toml"
+          "~/.config/aerospace/aerospace.toml"
+}
+
+// Hammerspoon: macOS automation via Lua.
+app "hammerspoon" label="Hammerspoon" {
+    comment "--"
+    macos "~/.hammerspoon/init.lua"
+          "~/.hammerspoon/**/*.lua"
+}
+
+// Karabiner-Elements: keyboard customisation for macOS.
+// JSON has no comment syntax — local guards not supported.
+app "karabiner" label="Karabiner-Elements" {
+    comment ""
+    macos "~/.config/karabiner/karabiner.json"
+          "~/.config/karabiner/assets/complex_modifications/**/*.json"
+}
+
+// sketchybar: highly customisable macOS menu bar replacement.
+// Config is a shell script — use '#' guards.
+app "sketchybar" label="SketchyBar" {
+    comment "#"
+    macos "~/.config/sketchybar/sketchybarrc"
+          "~/.config/sketchybar/plugins/**"
+          "~/.config/sketchybar/items/**"
+}
+
+// skhd: simple hotkey daemon for macOS.
+app "skhd" label="skhd" {
+    comment "#"
+    macos "~/.config/skhd/skhdrc"
+          "~/.skhdrc"
+}
+
+// yabai: tiling window manager for macOS.
+app "yabai" label="yabai" {
+    comment "#"
+    macos "~/.config/yabai/yabairc"
+          "~/.yabairc"
+}
+
+// ── Linux window managers & compositors ──────────────────────────────────────
+
+app "hyprland" label="Hyprland" {
+    comment "#"
+    linux "~/.config/hypr/hyprland.conf"
+          "~/.config/hypr/hyprpaper.conf"
+          "~/.config/hypr/hyprlock.conf"
+          "~/.config/hypr/conf.d/**"
+}
+
+app "i3" label="i3" {
+    comment "#"
+    linux "~/.config/i3/config"
+          "~/.config/i3/config.d/**"
+}
+
+app "niri" label="Niri" {
+    comment "//"
+    linux "~/.config/niri/config.kdl"
+}
+
+app "sway" label="Sway" {
+    comment "#"
+    linux "~/.config/sway/config"
+          "~/.config/sway/config.d/**"
+}
+
+// ── Linux desktop helpers ─────────────────────────────────────────────────────
+
+app "dunst" label="Dunst" {
+    comment "#"
+    linux "~/.config/dunst/dunstrc"
+}
+
+app "rofi" label="Rofi" {
+    comment "//"
+    linux "~/.config/rofi/config.rasi"
+          "~/.config/rofi/themes/**/*.rasi"
+}
+
+app "waybar" label="Waybar" {
+    comment "//"
+    linux "~/.config/waybar/config.jsonc"
+          "~/.config/waybar/style.css"
+}
+
+// ── Miscellaneous ─────────────────────────────────────────────────────────────
+
+// glow: terminal markdown renderer.
+app "glow" label="glow" {
+    comment "#"
+    unix  "~/.config/glow/glow.yml"
+}
+
+// navi: interactive cheatsheet browser.
+// Cheat files (personal) are excluded — only the app config is synced.
+app "navi" label="navi" {
+    comment "#"
+    unix  "~/.config/navi/config.yaml"
+}

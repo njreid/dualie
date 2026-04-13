@@ -6,9 +6,32 @@
 
 **Phase 2 ✓ complete** — KDL config with hot-reload, web UI removed, Unix socket status server.
 
+**Phase 3 ✓ complete** — Linux evdev+uinput local keyboard remapping.
+
+**Phase 5 ✓ complete** — `dualie-tui` binary with Status / Remaps / Caps Layer / Config / Sync tabs.
+
+**Phase 4 ✓ complete** — macOS keyboard remapping via IOHIDManager + Karabiner VirtualHIDDevice.
+
+**Phase 7 ✓ complete** — Git-backed config versioning. Repo layout `appname/config.kdl`.
+Platform paths via `directories` crate. `LocalConfig` from `local.kdl` (gitignored) carries
+machine-name and optional repo-path override. Auto-commit on every config save or serial-sync
+write. `git fetch` on startup populates `GIT_PENDING` for status display. TUI pull/push via
+`GitRepo::pull()` / `GitRepo::push()`.
+
+**Phase 6 ✓ complete** — Clipboard + config-file sync over CDC-ACM serial.
+
 **Current state:** The daemon loads `~/.config/dualie/dualie.kdl` (hot-reloaded via notify),
-maintains a CDC-ACM serial connection to the RP2040 with auto-reconnect, and exposes a status
-socket at `$XDG_RUNTIME_DIR/dualie/daemon.sock`. The intercept layer is a stub pending Phase 3.
+maintains a CDC-ACM serial connection to the RP2040 with auto-reconnect, exposes a status
+socket at `$XDG_RUNTIME_DIR/dualie/daemon.sock`, and on Linux grabs all attached keyboards
+via evdev, applies caps-layer / key / modifier remaps, and re-injects events via uinput.
+New keyboards are picked up automatically via udev hotplug.
+
+Config-file sync (`daemon/src/file_sync.rs`): `notify` watcher sends `SyncChunk` over serial
+when a watched file changes; receiver applies LWW + local-section guards, writes on remote win,
+saves `.dualie-conflict` backup on conflict.  Clipboard sync: `ClipboardPull` requests the
+other machine's clipboard; `ClipboardPush` delivers it.  Caps-layer `clip-pull` action
+sends the request.  Known apps registry embedded as `known_apps.kdl` (35+ apps); user
+overrides in `~/.config/dualie/user_apps.kdl`.
 
 ## Target state
 

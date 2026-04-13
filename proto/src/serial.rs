@@ -44,11 +44,29 @@ pub struct SerialPeerWriter(WriteHalf<SerialStream>);
 /// Read-only half of a `SerialPeer`.
 pub struct SerialPeerReader(ReadHalf<SerialStream>);
 
+// ── Framing helpers (pub(crate) for testing) ─────────────────────────────────
+
+/// Encode a `DualieMessage` into a COBS-framed byte vector (without the
+/// trailing `0x00` delimiter — the delimiter is written separately by `send`).
+pub(crate) fn encode_frame(msg: &DualieMessage) -> Result<Vec<u8>> {
+    let mut cbor = Vec::new();
+    ciborium::into_writer(msg, &mut cbor).context("CBOR serialise")?;
+    Ok(cobs::encode_vec(&cbor))
+}
+
+/// Decode a COBS-framed byte slice (without the trailing `0x00` delimiter)
+/// back into a `DualieMessage`.
+pub(crate) fn decode_frame(frame: &[u8]) -> Result<DualieMessage> {
+    let cbor = cobs::decode_vec(frame)
+        .map_err(|_| anyhow::anyhow!("COBS decode failed ({} bytes)", frame.len()))?;
+    let msg: DualieMessage = ciborium::from_reader(cbor.as_slice())
+        .context("CBOR deserialise")?;
+    Ok(msg)
+}
+
 impl SerialPeerWriter {
     pub async fn send(&mut self, msg: &DualieMessage) -> Result<()> {
-        let mut cbor = Vec::new();
-        ciborium::into_writer(msg, &mut cbor).context("CBOR serialise")?;
-        let encoded = cobs::encode_vec(&cbor);
+        let encoded = encode_frame(msg)?;
         self.0.write_all(&encoded).await.context("serial write")?;
         self.0.write_all(&[FRAME_DELIM]).await.context("serial write delimiter")?;
         debug!(msg = ?msg, "serial → RP2040");
@@ -66,12 +84,102 @@ impl SerialPeerReader {
             }
             frame_bytes.push(b);
         }
-        let cbor = cobs::decode_vec(&frame_bytes)
-            .map_err(|_| anyhow::anyhow!("COBS decode failed ({} bytes)", frame_bytes.len()))?;
-        let msg: DualieMessage = ciborium::from_reader(cbor.as_slice())
-            .context("CBOR deserialise")?;
+        let msg = decode_frame(&frame_bytes)?;
         debug!(msg = ?msg, "serial ← RP2040");
         Ok(msg)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ClipboardText, DualieMessage};
+
+    fn roundtrip(msg: &DualieMessage) -> DualieMessage {
+        let frame = encode_frame(msg).expect("encode");
+        decode_frame(&frame).expect("decode")
+    }
+
+    #[test]
+    fn ping_roundtrip() {
+        assert!(matches!(roundtrip(&DualieMessage::Ping), DualieMessage::Ping));
+    }
+
+    #[test]
+    fn virtual_action_roundtrip() {
+        let msg = DualieMessage::VirtualAction { slot: 7 };
+        assert!(matches!(roundtrip(&msg), DualieMessage::VirtualAction { slot: 7 }));
+    }
+
+    #[test]
+    fn active_output_roundtrip() {
+        let msg = DualieMessage::ActiveOutput { output: 1 };
+        assert!(matches!(roundtrip(&msg), DualieMessage::ActiveOutput { output: 1 }));
+    }
+
+    #[test]
+    fn firmware_info_roundtrip() {
+        let msg = DualieMessage::FirmwareInfo { version: 42 };
+        assert!(matches!(roundtrip(&msg), DualieMessage::FirmwareInfo { version: 42 }));
+    }
+
+    #[test]
+    fn error_roundtrip() {
+        let msg = DualieMessage::Error { message: "oops".into() };
+        if let DualieMessage::Error { message } = roundtrip(&msg) {
+            assert_eq!(message, "oops");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn clipboard_push_roundtrip() {
+        let msg = DualieMessage::ClipboardPush(ClipboardText { text: "hello world".into() });
+        if let DualieMessage::ClipboardPush(ct) = roundtrip(&msg) {
+            assert_eq!(ct.text, "hello world");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn reboot_to_bootloader_roundtrip() {
+        let msg = DualieMessage::RebootToBootloader;
+        assert!(matches!(roundtrip(&msg), DualieMessage::RebootToBootloader));
+    }
+
+    #[test]
+    fn encoded_frame_contains_no_zero_bytes() {
+        // COBS guarantees the payload has no 0x00 bytes.
+        // (The delimiter 0x00 is written separately and is NOT in encode_frame output.)
+        for msg in &[
+            DualieMessage::Ping,
+            DualieMessage::VirtualAction { slot: 0 },
+            DualieMessage::ActiveOutput { output: 1 },
+            DualieMessage::RebootToBootloader,
+        ] {
+            let frame = encode_frame(msg).unwrap();
+            assert!(
+                !frame.contains(&0x00),
+                "frame for {msg:?} contains 0x00 — COBS broken"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_truncated_frame_errors() {
+        assert!(decode_frame(&[]).is_err());
+        assert!(decode_frame(&[0xFF, 0x01]).is_err());
+    }
+
+    #[test]
+    fn decode_garbage_errors() {
+        // Valid COBS but invalid CBOR
+        let garbage = cobs::encode_vec(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(decode_frame(&garbage).is_err());
     }
 }
 

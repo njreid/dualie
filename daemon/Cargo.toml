@@ -21,16 +21,21 @@ serde_json = { workspace = true }   # retained for `dualie convert` migration to
 ciborium   = { workspace = true }
 
 # Config / storage
-directories = { version = "5" }    # platform config/data dirs
+directories  = { version = "5" }    # platform config/data dirs
+glob         = { version = "0.3" }  # glob expansion for sync file lists
+gethostname  = { version = "0.4" }  # fallback machine-name for local.kdl
+
+# Clipboard sync
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+# File sync hashing + once-cell for global channel
+sha2      = { version = "0.10" }
+once_cell = { version = "1" }
 
 # KDL config (Phase 2)
 kdl    = { version = "6" }         # KDL document model + parser
 miette = { version = "7", features = ["fancy"] }  # parse error reporting with source spans
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }  # file watcher
-
-# Key interception — rdev still compiled in for Phase 3/4 groundwork.
-# unstable_grab: CGEventTap suppression on macOS
-rdev = { version = "0.5", features = ["unstable_grab"] }
 
 # Logging
 tracing            = { workspace = true }
@@ -42,6 +47,18 @@ thiserror = { workspace = true }
 
 # CLI arguments
 clap = { version = "4", features = ["derive"] }
+
+# Key interception — Linux only (Phase 3).
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { version = "0.12" }
+udev  = { version = "0.8" }
+libc  = { version = "0.2" }
+
+# Key interception — macOS (Phase 4).  CGEventTap via ApplicationServices.
+# core-graphics provides CGEvent types; core-foundation provides CFRunLoop.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics   = { version = "0.23" }
+core-foundation = { version = "0.9" }
 
 [dev-dependencies]
 tokio-test = { version = "0.4" }
