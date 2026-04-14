@@ -1,3 +1,5 @@
+#![allow(non_upper_case_globals, non_camel_case_types)]
+
 /// intercept/macos.rs — macOS local keyboard remapping.
 ///
 /// # Architecture
@@ -32,8 +34,6 @@
 /// # Thread model
 ///
 /// `run()` blocks on `CFRunLoopRun()` — call from a dedicated OS thread.
-
-#![allow(non_upper_case_globals, non_camel_case_types)]
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -129,6 +129,9 @@ extern "C" {
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
     fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
     fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
+
+    static kIOHIDDeviceUsagePageKey: CFStringRef;
+    static kIOHIDDeviceUsageKey:     CFStringRef;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -150,12 +153,10 @@ extern "C" {
     ) -> *mut c_void;
     fn CFRelease(cf: *mut c_void);
 
-    static kCFAllocatorDefault:        CFAllocatorRef;
-    static kCFRunLoopDefaultMode:      CFStringRef;
-    static kCFTypeDictionaryKeyCallBacks:   c_void;
-    static kCFTypeDictionaryValueCallBacks: c_void;
-    static kIOHIDDeviceUsagePageKey:   CFStringRef;
-    static kIOHIDDeviceUsageKey:       CFStringRef;
+    static kCFAllocatorDefault:              CFAllocatorRef;
+    static kCFRunLoopDefaultMode:            CFStringRef;
+    static kCFTypeDictionaryKeyCallBacks:    c_void;
+    static kCFTypeDictionaryValueCallBacks:  c_void;
 }
 
 // ── Thread-local state ────────────────────────────────────────────────────────
@@ -284,7 +285,7 @@ pub fn run(
     });
 
     // Build a matching dictionary for keyboards (Usage Page 0x01, Usage 0x06).
-    let manager = unsafe {
+    let _manager = unsafe {
         let mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
         if mgr.is_null() { bail!("IOHIDManagerCreate returned NULL"); }
 

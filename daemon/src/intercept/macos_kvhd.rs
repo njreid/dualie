@@ -1,3 +1,5 @@
+#![allow(non_upper_case_globals, non_camel_case_types)]
+
 /// intercept/macos_kvhd.rs — IOKit bindings for Karabiner-VirtualHIDDevice.
 ///
 /// Provides a handle to the Karabiner DriverKit VirtualHIDKeyboard user client
@@ -25,8 +27,6 @@
 /// Source references:
 ///   https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
 ///   src/Extension/KarabinerDriverKitVirtualHIDKeyboard/UserClient.cpp
-
-#![allow(non_upper_case_globals, non_camel_case_types)]
 
 use std::ffi::c_void;
 
@@ -61,6 +61,8 @@ extern "C" {
         matching: *mut c_void,  // CFDictionaryRef consumed
     ) -> io_service_t;
 
+    fn IOServiceMatching(name: *const u8) -> *mut c_void; // returns CFMutableDictionaryRef
+
     fn IOServiceOpen(
         service:      io_service_t,
         owning_task:  mach_port_t,
@@ -83,7 +85,6 @@ extern "C" {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn IOServiceMatching(name: *const u8) -> *mut c_void; // returns CFMutableDictionaryRef
     fn mach_task_self_() -> mach_port_t;
 }
 
