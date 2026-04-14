@@ -30,13 +30,12 @@ one per host machine. No additional hub hardware is required.
 | GP29 | PIO-USB D− | USB host for attached keyboard/mouse |
 
 Both boards are 3.3 V logic. The UART runs directly between them (GP0/GP1 crossed:
-A-TX → B-RX, A-RX → B-TX). An optional galvanic isolator between the boards follows the
-original DeskHop design:
+A-TX → B-RX, A-RX → B-TX). An optional galvanic isolator can be inserted between the boards:
 
 | Isolator | Max speed | Notes |
 |----------|-----------|-------|
 | TI ISO7721DR | 100 Mbps | Preferred — supports high UART baud rates |
-| ADuM1201BRZ | 1 Mbps | Original DeskHop part — limits UART to 1 Mbaud |
+| ADuM1201BRZ | 1 Mbps | Limits UART to 1 Mbaud |
 
 ---
 
@@ -101,19 +100,20 @@ one connected via the RP2040 hardware:
 
 This gives a consistent typing experience regardless of which keyboard you're using.
 
-### macOS: Karabiner-VirtualHIDDevice
+### macOS: IOHIDManager + Karabiner-VirtualHIDDevice
 
 CGEventTap cannot reliably treat Caps Lock as a layer modifier (the OS handles it specially
-before events reach the tap). The daemon therefore uses
+before events reach the tap). The daemon uses IOHIDManager to grab keyboards at the HID
+driver level, and injects remapped events via
 [Karabiner-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-VirtualHIDDevice) — the
 driver-level component of Karabiner-Elements, available as a standalone install.
 
 Flow:
 
-1. CGEventTap intercepts the raw key event (Accessibility permission required)
+1. IOHIDManager grabs all keyboards at driver level (Input Monitoring permission required)
 2. Daemon applies remap config in userspace
 3. Remapped event is injected via the Karabiner virtual HID device at driver level
-4. Original event is suppressed
+4. Original event is suppressed (never reaches the OS event tap layer)
 
 The Karabiner-Elements app does **not** need to be installed or running. Only the
 `Karabiner-VirtualHIDDevice.dext` system extension is required. Once approved in System
@@ -171,8 +171,8 @@ This is the only command needed, run from Machine A (the dev machine):
 5. RP2040-A automatically transfers the firmware image to RP2040-B over the inter-board UART
 6. RP2040-B flashes itself and reboots
 
-No physical access to the far machine or RP2040-B is required. This reuses the
-cross-board upgrade mechanism from the original DeskHop firmware.
+No physical access to the far machine or RP2040-B is required. The cross-board
+firmware transfer uses the inter-board UART link.
 
 ---
 
