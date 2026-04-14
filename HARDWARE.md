@@ -68,7 +68,7 @@ virtual action, it sends a COBS-framed `DualieMessage::VirtualAction { slot }` o
 serial port. The daemon receives it directly — no HID keycode emitted, no interception
 required.
 
-```
+```text
 Old:  Caps+key → RP2040 emits F13 HID keycode → daemon intercepts via CGEventTap/evdev
                  → suppresses → looks up slot → dispatches action
                  ↑ fragile, leaky, uses up keycode space
@@ -109,6 +109,7 @@ before events reach the tap). The daemon therefore uses
 driver-level component of Karabiner-Elements, available as a standalone install.
 
 Flow:
+
 1. CGEventTap intercepts the raw key event (Accessibility permission required)
 2. Daemon applies remap config in userspace
 3. Remapped event is injected via the Karabiner virtual HID device at driver level
