@@ -1,7 +1,0 @@
-services:
-  build_container:
-    image: deskhop-build
-    build:
-      context: .
-    volumes:
-      - ..:/deskhop:z
