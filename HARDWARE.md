@@ -77,8 +77,8 @@ New:  Caps+key → RP2040 sends VirtualAction { slot: 5 } over CDC-ACM serial
                  ↑ direct, clean, no HID involvement
 ```
 
-The serial channel is also the foundation for future clipboard relay and file sync between
-the two machines (see Future section below).
+The serial channel also carries clipboard relay and config-file sync between the two
+machines — see the daemon's `file_sync.rs` and `clipboard.rs` for the implementation.
 
 ### Message framing
 
