@@ -186,6 +186,7 @@ impl SyncConfig {
     }
 
     /// Remove an app name; returns true if it was present.
+    #[allow(dead_code)]
     pub fn remove_app(&mut self, name: &str) -> bool {
         let before = self.apps.len();
         self.apps.retain(|a| a != name);
@@ -251,6 +252,7 @@ impl DualieConfig {
     }
 
     /// Save config to `dualie.kdl`.
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         let path = kdl_config_path();
         if let Some(parent) = path.parent() {
@@ -262,6 +264,7 @@ impl DualieConfig {
     }
 
     /// Export config as a CBOR blob (for firmware push).
+    #[allow(dead_code)]
     pub fn to_cbor(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf)?;
@@ -269,6 +272,7 @@ impl DualieConfig {
     }
 
     /// Import config from a CBOR blob.
+    #[allow(dead_code)]
     pub fn from_cbor(bytes: &[u8]) -> Result<Self> {
         Ok(ciborium::from_reader(bytes)?)
     }
@@ -352,6 +356,7 @@ impl DualieConfig {
     // ── KDL serialisation ─────────────────────────────────────────────────────
 
     /// Serialise config to a KDL string.
+    #[allow(dead_code)]
     pub fn to_kdl_string(&self) -> String {
         let mut s = String::from(
             "// dualie.kdl\n\
@@ -817,6 +822,7 @@ pub fn keycode_by_name(name: &str) -> Option<u8> {
 }
 
 /// Reverse: HID keycode → display name (used by `to_kdl_string`).
+#[allow(dead_code)]
 fn kc_display(kc: u8) -> String {
     // a-z
     if (0x04..=0x1D).contains(&kc) {
@@ -862,6 +868,7 @@ fn modifier_by_name(name: &str) -> Option<u8> {
 }
 
 /// Single-modifier display name used in chord `mod_key` tokens.
+#[allow(dead_code)]
 fn mod_bit_name(bit: u8) -> &'static str {
     match bit {
         0x01 => "ctrl",   0x02 => "shift",
@@ -873,6 +880,7 @@ fn mod_bit_name(bit: u8) -> &'static str {
 }
 
 /// Build the `mod1_mod2_` prefix string for a modifier bitmask (e.g. `ctrl_shift_`).
+#[allow(dead_code)]
 fn mod_prefix(m: u8) -> String {
     if m == 0 { return String::new(); }
     let mut parts = Vec::new();
@@ -883,6 +891,7 @@ fn mod_prefix(m: u8) -> String {
 }
 
 /// Display a modifier bitmask for `modifier` remap entries (e.g. `lalt`).
+#[allow(dead_code)]
 fn mod_display(m: u8) -> String {
     match m {
         0x01 => "lctrl".into(),  0x02 => "lshift".into(),

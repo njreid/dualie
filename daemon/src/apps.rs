@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use kdl::{KdlDocument, KdlNode};
 use tracing::warn;
 
@@ -42,6 +42,7 @@ pub struct AppDef {
     /// Short machine-readable name (e.g. `"zellij"`).
     pub name: String,
     /// Human-readable label (e.g. `"Zellij"`).
+    #[allow(dead_code)]
     pub label: String,
     /// Line-comment prefix for this app's config format (e.g. `"#"`, `"//"`).
     /// Empty string means no comment support — local guards are disabled.
@@ -133,6 +134,7 @@ impl AppRegistry {
     }
 
     /// Number of apps in the registry.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.order.len()
     }

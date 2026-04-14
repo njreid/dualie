@@ -1,3 +1,9 @@
+// This module serialises DualieConfig into the firmware binary format.
+// It is not currently called from the main daemon code path (config is
+// exchanged over serial/git rather than as a raw firmware blob), but is
+// kept for testing and future use.
+#![allow(dead_code)]
+
 /// Serialise `DualieConfig` into the `config_t` binary blob expected by the
 /// Dualie firmware (RP2040, little-endian, GCC struct layout).
 ///

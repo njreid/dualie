@@ -200,6 +200,7 @@ pub fn evdev_modifier_bit(evdev: u16) -> u8 {
 
 /// Return the evdev key code for a given HID modifier bitmask bit.
 /// Uses the left-hand variant for each modifier.
+#[allow(dead_code)]
 pub fn modifier_bit_to_evdev(bit: u8) -> u16 {
     match bit {
         0x01 => 29,  // lctrl
@@ -220,6 +221,7 @@ pub fn modifier_bit_to_evdev(bit: u8) -> u16 {
 /// (0xE0–0xE7, Usage Page 0x07).  Returns 0 if the keycode is not a modifier.
 ///
 /// Used by the macOS IOHIDManager path, which delivers raw HID usage codes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn hid_modifier_bit(hid: u8) -> u8 {
     match hid {
         0xE0 => 0x01, // Left Control

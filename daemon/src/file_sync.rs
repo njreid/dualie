@@ -29,10 +29,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::apps::AppRegistry;
 use crate::config::DualieConfig;
