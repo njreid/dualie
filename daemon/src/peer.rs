@@ -18,6 +18,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
+/// Delay used when the device exists but the connection attempt fails
+/// (e.g. permissions, protocol error) — avoids a busy-retry.
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
 /// Minimum firmware version the daemon considers compatible.
 /// If the RP2040 reports a lower version, the daemon logs a warning and
 /// suggests running `just flash` to upgrade.
@@ -27,7 +31,6 @@ pub const FIRMWARE_MIN_COMPATIBLE: u32 = 1;
 /// Read by the status server without going through a channel.
 pub static CONNECTED: AtomicBool = AtomicBool::new(false);
 
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const TX_QUEUE: usize = 64;
 
 // ── SerialClient handle ───────────────────────────────────────────────────────
@@ -152,6 +155,96 @@ async fn run_once(serial_path: &str, client: &SerialClient) -> Result<()> {
     }
 }
 
+// ── Device wait (udev on Linux, poll fallback elsewhere) ──────────────────────
+
+/// Wait until `path` is present on the filesystem.
+///
+/// On Linux: subscribes to udev `tty` add events and returns as soon as the
+/// exact devnode appears — no polling, zero CPU while the device is absent.
+///
+/// On other platforms: falls back to a 5-second sleep retry.
+async fn wait_for_device(path: &str) {
+    if std::path::Path::new(path).exists() {
+        // Device is present but connection failed — brief delay before retry.
+        sleep(RECONNECT_DELAY).await;
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        info!("waiting for {path} to appear…");
+        let path_owned = path.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            wait_udev_tty(&path_owned)
+        }).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("udev wait failed ({e:#}), retrying in 5s");
+                sleep(Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                warn!("udev task panicked ({e}), retrying in 5s");
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        info!("device absent — retrying in 5s");
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Blocking: watch udev for a `tty` ADD event matching `path`, then return.
+///
+/// The udev socket is non-blocking, so we use `poll(2)` to wait for readability
+/// then drain events with `socket.iter()` (which returns `None` when empty).
+#[cfg(target_os = "linux")]
+fn wait_udev_tty(path: &str) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    use udev::MonitorBuilder;
+
+    let monitor = MonitorBuilder::new()?
+        .match_subsystem("tty")?
+        .listen()?;
+
+    // Re-check after arming the monitor to close the TOCTOU window.
+    if std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+
+    let fd = monitor.as_raw_fd();
+    loop {
+        // Block until the socket has data.
+        let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue; // EINTR — retry
+            }
+            return Err(err.into());
+        }
+
+        // Drain all pending events (non-blocking reads).
+        for event in monitor.iter() {
+            if event.event_type() == udev::EventType::Add {
+                if let Some(node) = event.devnode() {
+                    if node == std::path::Path::new(path) {
+                        info!("{path} appeared");
+                        // Brief settle: give the serial driver time to finish init.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── Background reconnect loop ─────────────────────────────────────────────────
 
 /// Spawn the serial peer as a background task.  Returns a `SerialClient` handle.
@@ -166,8 +259,7 @@ pub fn spawn(serial_path: String) -> SerialClient {
                 Err(e) => error!("serial connection error: {e:#}"),
             }
             client_bg.set_sender(None).await;
-            info!("reconnecting in {}s …", RECONNECT_DELAY.as_secs());
-            sleep(RECONNECT_DELAY).await;
+            wait_for_device(&serial_path).await;
         }
     });
 
