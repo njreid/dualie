@@ -522,7 +522,9 @@ impl DualieConfig {
                     Ok(Ok(event)) => {
                         if !event.paths.iter().any(|p| p == &path) { continue; }
                         if matches!(event.kind,
-                            notify::EventKind::Create(_) | notify::EventKind::Modify(_))
+                            notify::EventKind::Create(_) |
+                            notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) |
+                            notify::EventKind::Modify(notify::event::ModifyKind::Any))
                         {
                             match Self::load_or_default() {
                                 Ok(cfg) => {

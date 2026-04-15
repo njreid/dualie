@@ -82,9 +82,12 @@ async fn run_watcher(
     let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
     let fs_tx = Arc::new(fs_tx);
 
-    // Start with an empty watcher; rebuilt on config changes.
-    let mut _watcher: Option<RecommendedWatcher> = None;
-    let mut watched_paths: HashSet<PathBuf> = HashSet::new();
+    // Build the initial watcher from the current config without waiting for a change.
+    let initial_cfg = cfg_rx.borrow().clone();
+    let (init_watcher, init_paths) = build_watcher(&initial_cfg, Arc::clone(&fs_tx));
+    let mut _watcher: Option<RecommendedWatcher> = Some(init_watcher);
+    let mut watched_paths: HashSet<PathBuf> = init_paths;
+    info!(count = watched_paths.len(), "sync: watching files");
 
     loop {
         tokio::select! {
@@ -92,9 +95,11 @@ async fn run_watcher(
             _ = cfg_rx.changed() => {
                 let cfg = cfg_rx.borrow_and_update().clone();
                 let (watcher, paths) = build_watcher(&cfg, Arc::clone(&fs_tx));
+                if paths.len() != watched_paths.len() || paths != watched_paths {
+                    info!(count = paths.len(), "sync: watching files");
+                }
                 watched_paths = paths;
                 _watcher = Some(watcher);
-                info!(count = watched_paths.len(), "sync: watching files");
             }
 
             // Notify fired — a watched file changed.
