@@ -10,6 +10,45 @@ use std::path::PathBuf;
 /// Number of virtual action slots (0-31).
 pub const DUALIE_VKEY_COUNT: usize = 32;
 
+/// Starter config written on first run when no `dualie.kdl` exists.
+const DEFAULT_CONFIG: &str = r#"// dualie.kdl — Dualie configuration
+// Docs: https://github.com/njreid/dualie
+//
+// output A  — remaps and caps-layer for Machine A
+// output B  — remaps and caps-layer for Machine B
+// sync      — apps whose config files to sync between machines
+// git-sync  — remote git repo for config versioning
+
+output A {
+    // remap {
+    //     key capslock esc          // remap a key
+    //     modifier lalt lctrl       // swap modifiers
+    // }
+
+    layers {
+        caps {
+            // chord h left          // caps+H → Left arrow
+            // chord l right         // caps+L → Right arrow
+            // chord k up
+            // chord j down
+            // swap  n               // caps+N → switch to other output
+        }
+    }
+}
+
+output B {}
+
+sync {
+    // app "fish"
+    // app "neovim"
+    // app "git"
+}
+
+// git-sync {
+//     remote "git@github.com:you/dotfiles.git"
+// }
+"#;
+
 // ── Virtual action definitions ────────────────────────────────────────────────
 
 /// The type of action the daemon should perform when a virtual key fires.
@@ -498,6 +537,20 @@ impl DualieConfig {
     /// yields the latest parsed config whenever the file changes.
     pub fn watch() -> Result<tokio::sync::watch::Receiver<Self>> {
         let path = kdl_config_path();
+
+        // Ensure the config directory exists.
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating config dir {}", dir.display()))?;
+        }
+
+        // Write a starter config if none exists yet.
+        if !path.exists() {
+            std::fs::write(&path, DEFAULT_CONFIG)
+                .with_context(|| format!("writing default config to {}", path.display()))?;
+            tracing::info!("created default config at {}", path.display());
+        }
+
         let initial = Self::load_or_default()?;
         let (tx, rx) = tokio::sync::watch::channel(initial);
 

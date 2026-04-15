@@ -278,7 +278,7 @@ pub fn spawn(repo: Arc<GitRepo>) {
                     Err(e) => warn!("git: pending_count: {e}"),
                 }
             }
-            Err(e) => warn!("git: initial fetch skipped: {e}"),
+            Err(e) => tracing::debug!("git: initial fetch skipped (no remote configured?): {e:#}"),
         }
 
         // Auto-commit trigger loop.
