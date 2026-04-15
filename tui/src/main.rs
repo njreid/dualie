@@ -54,6 +54,12 @@ enum Cmd {
     Pull,
     /// Push config to the git remote
     Push,
+    /// List installed GUI applications and their app-id values for use in actions blocks
+    ListApps {
+        /// Filter by name (case-insensitive substring match)
+        #[arg(value_name = "FILTER")]
+        filter: Option<String>,
+    },
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -433,6 +439,9 @@ async fn main() -> Result<()> {
         Some(Cmd::Push) => {
             cmd_git(&socket_path, &["push", "origin", "main"], "push")?;
         }
+        Some(Cmd::ListApps { filter }) => {
+            cmd_list_apps(filter.as_deref())?;
+        }
     }
     Ok(())
 }
@@ -507,6 +516,161 @@ fn cmd_git(socket_path: &str, git_args: &[&str], op: &str) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+// ── list-apps ─────────────────────────────────────────────────────────────────
+
+fn cmd_list_apps(filter: Option<&str>) -> Result<()> {
+    let apps = list_gui_apps()?;
+    let filter_lower = filter.map(|f| f.to_ascii_lowercase());
+
+    let mut count = 0;
+    for (app_id, name) in &apps {
+        if let Some(ref f) = filter_lower {
+            let name_lower = name.to_ascii_lowercase();
+            let id_lower  = app_id.to_ascii_lowercase();
+            if !name_lower.contains(f.as_str()) && !id_lower.contains(f.as_str()) {
+                continue;
+            }
+        }
+        println!("{app_id:<45}  {name}");
+        count += 1;
+    }
+
+    if count == 0 {
+        if let Some(f) = filter {
+            eprintln!("No apps matching {f:?}.");
+        } else {
+            eprintln!("No apps found.");
+        }
+    }
+    Ok(())
+}
+
+/// Returns a sorted list of `(app_id, display_name)` pairs for installed GUI apps.
+fn list_gui_apps() -> Result<Vec<(String, String)>> {
+    #[cfg(target_os = "linux")]
+    return list_gui_apps_linux();
+    #[cfg(target_os = "macos")]
+    return list_gui_apps_macos();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Ok(vec![]);
+}
+
+#[cfg(target_os = "linux")]
+fn list_gui_apps_linux() -> Result<Vec<(String, String)>> {
+    use std::io::{BufRead, BufReader};
+
+    let search_dirs = {
+        let mut dirs = vec![
+            std::path::PathBuf::from("/usr/share/applications"),
+            std::path::PathBuf::from("/usr/local/share/applications"),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(std::path::Path::new(&home).join(".local/share/applications"));
+        }
+        if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
+            for dir in data_dirs.split(':') {
+                dirs.push(std::path::Path::new(dir).join("applications"));
+            }
+        }
+        dirs
+    };
+
+    let mut apps: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for dir in &search_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+
+            let basename = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned();
+            if !seen.insert(basename.clone()) { continue; }
+
+            // Parse the [Desktop Entry] section for Name= and NoDisplay=
+            let Ok(file) = std::fs::File::open(&path) else { continue };
+            let mut name = String::new();
+            let mut no_display = false;
+            let mut in_desktop_entry = false;
+
+            for line in BufReader::new(file).lines().map_while(|l| l.ok()) {
+                let line = line.trim();
+                if line == "[Desktop Entry]" {
+                    in_desktop_entry = true;
+                    continue;
+                }
+                if line.starts_with('[') {
+                    if in_desktop_entry { break; } // left the section
+                    continue;
+                }
+                if !in_desktop_entry { continue; }
+                if let Some(val) = line.strip_prefix("Name=") {
+                    if name.is_empty() { name = val.to_owned(); }
+                }
+                if line == "NoDisplay=true" || line == "Hidden=true" {
+                    no_display = true;
+                }
+            }
+
+            if !no_display && !name.is_empty() {
+                apps.push((basename, name));
+            }
+        }
+    }
+
+    apps.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+    Ok(apps)
+}
+
+#[cfg(target_os = "macos")]
+fn list_gui_apps_macos() -> Result<Vec<(String, String)>> {
+    use std::io::{BufRead, BufReader};
+
+    let search_dirs = [
+        std::path::PathBuf::from("/Applications"),
+        std::path::PathBuf::from("/System/Applications"),
+    ];
+
+    let mut apps: Vec<(String, String)> = Vec::new();
+
+    for dir in &search_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("app") { continue; }
+
+            let display_name = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned();
+
+            // Read bundle ID from Contents/Info.plist using plutil.
+            let plist = path.join("Contents/Info.plist");
+            if !plist.exists() { continue; }
+
+            let out = std::process::Command::new("plutil")
+                .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"])
+                .arg(&plist)
+                .output();
+
+            if let Ok(out) = out {
+                let bundle_id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if !bundle_id.is_empty() {
+                    apps.push((bundle_id, display_name));
+                }
+            }
+        }
+    }
+
+    apps.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+    Ok(apps)
 }
 
 async fn run_app<B: ratatui::backend::Backend>(

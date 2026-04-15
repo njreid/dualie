@@ -108,13 +108,24 @@ machine desk {
         modifier lalt lctrl      // swap Alt and Ctrl on this machine
     }
 
+    // Define virtual actions (app launches or shell commands).
+    // Each action is assigned a slot in order; reference it by label in the caps layer.
+    // macOS: app-id is the bundle ID  (dua list-apps)
+    // Linux: app-id is the .desktop basename  (dua list-apps)
+    actions {
+        launch "Slack"    app-id="com.tinyspeck.slackmacgap"
+        launch "Terminal" app-id="com.apple.Terminal"
+        shell  "Reload"   command="launchctl kickstart -k user/com.example.myagent"
+    }
+
     layers {
         caps {
             chord  h left        // caps+H → Left arrow
             chord  l right       // caps+L → Right arrow
             chord  k up
             chord  j down
-            action s "Slack"     // caps+S → launch Slack
+            action s "Slack"     // caps+S → launch Slack (matches label above)
+            action t "Terminal"  // caps+T → open Terminal
             swap   n             // caps+N → switch to other output
         }
     }
@@ -137,6 +148,47 @@ git-sync {
     remote "git@github.com:you/dotfiles.git"
 }
 ```
+
+### App launching and shell commands
+
+The `actions` block inside a `machine {}` defines up to 32 virtual actions.
+Each entry is either a `launch` (focus or open an app) or a `shell` (run a command):
+
+```kdl
+machine desk {
+    actions {
+        // macOS: app-id is the bundle identifier
+        //   find it with: osascript -e 'id of app "Slack"'
+        //   or:           dua list-apps
+        launch "Slack"    app-id="com.tinyspeck.slackmacgap"
+        launch "Terminal" app-id="com.apple.Terminal"
+
+        // Linux: app-id is the .desktop file basename (no .desktop extension)
+        //   find it with: dua list-apps
+        //   or:           ls /usr/share/applications/
+        launch "Slack"    app-id="slack"
+        launch "Firefox"  app-id="firefox"
+
+        // Shell commands work on both platforms
+        shell  "Lock"     command="loginctl lock-session"
+        shell  "Reload"   command="swaymsg reload"
+    }
+
+    layers {
+        caps {
+            action s "Slack"    // caps+S fires the action labelled "Slack"
+            action f "Firefox"
+            action l "Lock"
+        }
+    }
+}
+```
+
+Use `dua list-apps` to browse installed applications and their IDs on the current machine.
+
+Actions are fired by the daemon when the RP2040 sends a `VirtualAction` message
+over CDC-ACM (triggered by caps-layer shortcuts on hardware-connected keyboards),
+or directly by the intercept layer for keyboards connected straight to the host.
 
 ### Config-file sync
 
