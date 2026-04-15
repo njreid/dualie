@@ -142,8 +142,18 @@ fn keyboard_task(
     let mut device = Device::open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
 
-    device.grab()
-        .with_context(|| format!("grabbing {}", path.display()))?;
+    if let Err(e) = device.grab() {
+        let hint = match e.raw_os_error() {
+            Some(libc::EBUSY) =>
+                " — another process has exclusive grab; is dualie already running? \
+                 (`systemctl --user stop dualie`)",
+            Some(libc::EACCES) | Some(libc::EPERM) =>
+                " — permission denied; are you in the 'input' group? \
+                 (`sudo usermod -aG input $USER` then re-login, or run `just install`)",
+            _ => "",
+        };
+        anyhow::bail!("grabbing {}{hint}", path.display());
+    }
 
     info!("grabbed keyboard: {} ({})", device.name().unwrap_or("?"), path.display());
 

@@ -44,6 +44,20 @@ async fn main() -> Result<()> {
         return run_serial_cmd(&cmd, args.serial.as_deref()).await;
     }
 
+    // ── Guard against duplicate instances ────────────────────────────────────
+    {
+        let sock = status::socket_path();
+        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+            eprintln!(
+                "error: dualie is already running (socket {}).\n\
+                 Stop the existing instance first:\n\
+                 \n  systemctl --user stop dualie\n\nor kill the process and retry.",
+                sock.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
     // ── Load config (KDL, with JSON legacy fallback) ──────────────────────────
     let cfg_rx = DualieConfig::watch()?;
     info!("config: {}", config::kdl_config_path().display());
