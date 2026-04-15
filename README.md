@@ -53,28 +53,52 @@ instructions.
 
 ---
 
-## Daemon
-
-### Install
+## Install
 
 ```shell
 just install
 ```
 
-Builds the daemon in release mode, installs to `~/.local/bin/dualie`, and
-registers a systemd user service (Linux) or launchd agent (macOS).
+Builds and installs two binaries to `~/.local/bin/`:
 
-### Config
+| Binary | Purpose |
+|--------|---------|
+| `dualie` | Background daemon — runs as a systemd user service (Linux) or launchd agent (macOS) |
+| `dua` | CLI and TUI client |
 
-Config lives at `~/.config/dualie/dualie.kdl` and is hot-reloaded on save.
+On Linux, also installs a udev rule so the daemon can grab `/dev/input/` devices without root.
+
+---
+
+## dua — CLI and TUI
+
+```shell
+dua              # open the interactive TUI
+dua status       # print daemon status to stdout
+dua pull         # pull config from git remote and hot-reload
+dua push         # push config to git remote
+```
+
+The TUI has five tabs (switch with Tab / number keys):
+
+**Status** · **Remaps** · **Caps Layer** · **Config** · **Sync**
+
+Press `p` to pull, `u` to push from any tab. Press `q` to quit.
+
+---
+
+## Config
+
+Config lives at `~/.config/dualie/dualie.kdl` and is created automatically
+on first run. It is hot-reloaded whenever you save the file.
 
 ```kdl
-// dualie.kdl — example config
+// dualie.kdl
 
 output A {
     remap {
         key capslock esc
-        modifier lalt rctrl      // swap Alt and Ctrl on this output
+        modifier lalt lctrl      // swap Alt and Ctrl on this output
     }
 
     layers {
@@ -84,7 +108,7 @@ output A {
             chord  k up
             chord  j down
             action s "Slack"     // caps+S → launch Slack
-            swap   n             // caps+N → toggle output
+            swap   n             // caps+N → switch to other output
         }
     }
 }
@@ -96,17 +120,24 @@ sync {
     app "neovim"
     app "git"
 }
+
+git-sync {
+    remote "git@github.com:you/dotfiles.git"
+}
 ```
 
-### TUI
+### Config-file sync
 
-```shell
-dualie-tui
-```
+The `sync` block lists apps whose config files to sync between machines over
+the serial link. Dualie ships a registry of 40+ common tools (shells, editors,
+terminal emulators, window managers). Enable an app by name; Dualie watches
+the relevant files and pushes changes to the other machine automatically.
 
-Tabs: **Status** · **Remaps** · **Caps Layer** · **Config** · **Sync**
+### Git versioning
 
-Press `p` to pull from the git remote, `u` to push.
+The `git-sync` block sets a remote git repo. Dualie auto-commits config
+changes locally. Use `dua pull` / `dua push` (or `p`/`u` in the TUI) to sync
+with the remote.
 
 ---
 
@@ -137,8 +168,7 @@ UART. No physical access to the far machine required.
 ```
 daemon/          Rust daemon (key remap, serial peer, config sync, git versioning)
 proto/           Shared message types (DualieMessage — CBOR over COBS)
-tui/             Terminal UI (dualie-tui)
-hub/             Unused hub code (archived)
+tui/             dua CLI/TUI client
 src/             RP2040 firmware (C, TinyUSB)
 resources/       systemd service + launchd plist
 homebrew/        Homebrew formula
