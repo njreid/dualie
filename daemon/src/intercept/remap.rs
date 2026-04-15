@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::{
-    OutputDaemonConfig,
+    MachineConfig,
     CAPS_ENTRY_CHORD, CAPS_ENTRY_CLIP_PULL, CAPS_ENTRY_JUMP_A, CAPS_ENTRY_JUMP_B,
     CAPS_ENTRY_SWAP, CAPS_ENTRY_VIRTUAL,
 };
@@ -87,7 +87,7 @@ impl CompiledOutputConfig {
     ///
     /// `output_index`: 0 for A, 1 for B.
     /// `output_count`: total number of outputs (for swap wrapping).
-    pub fn from_config(cfg: &OutputDaemonConfig, output_index: u8, output_count: u8) -> Self {
+    pub fn from_config(cfg: &MachineConfig, output_index: u8, output_count: u8) -> Self {
         let mut out = CompiledOutputConfig {
             output_index,
             output_count,
@@ -349,12 +349,12 @@ mod tests {
     use super::*;
     use super::*;
     use crate::config::{
-        CapsLayer, CapsLayerEntry, KeyRemap, ModifierRemap, OutputDaemonConfig, VirtualAction,
+        CapsLayer, CapsLayerEntry, KeyRemap, MachineConfig, ModifierRemap, VirtualAction,
         CAPS_ENTRY_CHORD, CAPS_ENTRY_JUMP_A, CAPS_ENTRY_JUMP_B, CAPS_ENTRY_SWAP, CAPS_ENTRY_VIRTUAL,
     };
 
     fn make_cfg() -> CompiledOutputConfig {
-        let cfg = OutputDaemonConfig {
+        let cfg = MachineConfig {
             virtual_actions: {
                 let mut v = vec![VirtualAction::Unset; 32];
                 v[0] = VirtualAction::AppLaunch {
@@ -401,6 +401,7 @@ mod tests {
                     },
                 ],
             },
+            skip: vec![],
         };
         CompiledOutputConfig::from_config(&cfg, 0, 2)
     }
@@ -518,7 +519,7 @@ mod tests {
     #[test]
     fn key_remap_with_src_modifier_only_fires_when_modifier_held() {
         // caps → esc remap has src_modifier=0 so always fires; test a modifier-gated remap
-        let cfg_b = OutputDaemonConfig {
+        let cfg_b = MachineConfig {
             virtual_actions: vec![VirtualAction::Unset; 32],
             key_remaps: vec![
                 // Only remap 'a' to 'e' when lshift (0x02) is held
@@ -527,6 +528,7 @@ mod tests {
             ],
             modifier_remaps: vec![],
             caps_layer: CapsLayer::default(),
+            skip: vec![],
         };
         let compiled = CompiledOutputConfig::from_config(&cfg_b, 0, 2);
         let mut state = LayerState::default();
@@ -543,7 +545,7 @@ mod tests {
 
     #[test]
     fn unmapped_passthrough_false_drops_unbound_caps_key() {
-        let cfg_b = OutputDaemonConfig {
+        let cfg_b = MachineConfig {
             virtual_actions: vec![VirtualAction::Unset; 32],
             key_remaps: vec![],
             modifier_remaps: vec![],
@@ -551,6 +553,7 @@ mod tests {
                 unmapped_passthrough: false,
                 entries: vec![],
             },
+            skip: vec![],
         };
         let compiled = CompiledOutputConfig::from_config(&cfg_b, 0, 2);
         let mut state = LayerState { caps_held: true, ..Default::default() };
@@ -597,7 +600,7 @@ mod tests {
     #[test]
     fn output_mask_excludes_entry() {
         // Compile cfg as output 1 (B), but caps entry has output_mask=1 (only A)
-        let cfg_b = OutputDaemonConfig {
+        let cfg_b = MachineConfig {
             virtual_actions: vec![VirtualAction::Unset; 32],
             key_remaps: vec![],
             modifier_remaps: vec![],
@@ -611,6 +614,7 @@ mod tests {
                     },
                 ],
             },
+            skip: vec![],
         };
         let compiled = CompiledOutputConfig::from_config(&cfg_b, 1 /*output B*/, 2);
         let mut state = LayerState { caps_held: true, ..Default::default() };

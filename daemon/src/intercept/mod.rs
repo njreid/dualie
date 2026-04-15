@@ -50,11 +50,14 @@ pub fn new_active_output() -> ActiveOutput {
 /// event (macOS) so that output switches and config hot-reloads take effect
 /// immediately without any extra bookkeeping.
 pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::CompiledOutputConfig {
+    use crate::config::MachineConfig;
     let output_idx = active_output.load(Ordering::Relaxed);
-    let out_cfg = cfg.outputs
-        .get(output_idx as usize)
-        .unwrap_or(&cfg.outputs[0]);
-    remap::CompiledOutputConfig::from_config(out_cfg, output_idx, cfg.outputs.len() as u8)
+    // Resolve active port → machine config; fall back to an empty config if
+    // no machine is assigned to this port.
+    static EMPTY: std::sync::OnceLock<MachineConfig> = std::sync::OnceLock::new();
+    let empty = EMPTY.get_or_init(MachineConfig::default);
+    let machine = cfg.resolve_port(output_idx as usize).unwrap_or(empty);
+    remap::CompiledOutputConfig::from_config(machine, output_idx, 2)
 }
 
 /// Dispatch the side-effects of a `ProcessResult` — output switch, clipboard

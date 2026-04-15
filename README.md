@@ -95,10 +95,17 @@ on first run. It is hot-reloaded whenever you save the file.
 ```kdl
 // dualie.kdl
 
-output A {
+// Map physical output ports to machine names.
+ports {
+    a desk
+    b laptop
+}
+
+// Per-machine key remaps, caps-layer shortcuts, and sync skip list.
+machine desk {
     remap {
         key capslock esc
-        modifier lalt lctrl      // swap Alt and Ctrl on this output
+        modifier lalt lctrl      // swap Alt and Ctrl on this machine
     }
 
     layers {
@@ -111,9 +118,14 @@ output A {
             swap   n             // caps+N → switch to other output
         }
     }
+
+    // skip {
+    //     app "hammerspoon"     // don't sync this app to this machine
+    // }
 }
 
-output B {}
+machine laptop {
+}
 
 sync {
     app "fish"
@@ -132,6 +144,10 @@ The `sync` block lists apps whose config files to sync between machines over
 the serial link. Dualie ships a registry of 40+ common tools (shells, editors,
 terminal emulators, window managers). Enable an app by name; Dualie watches
 the relevant files and pushes changes to the other machine automatically.
+
+A `skip {}` block inside a `machine {}` block prevents that app's config from
+being written to that machine — it is still stored in git and synced to other
+machines.
 
 ### Git versioning
 

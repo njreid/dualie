@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use directories::ProjectDirs;
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 
@@ -14,12 +15,17 @@ pub const DUALIE_VKEY_COUNT: usize = 32;
 const DEFAULT_CONFIG: &str = r#"// dualie.kdl — Dualie configuration
 // Docs: https://github.com/njreid/dualie
 //
-// output A  — remaps and caps-layer for Machine A
-// output B  — remaps and caps-layer for Machine B
-// sync      — apps whose config files to sync between machines
-// git-sync  — remote git repo for config versioning
+// ports         — map physical output ports (a/b) to machine names
+// machine <n>   — per-machine key remaps, caps layer, and sync skip list
+// sync          — apps whose config files to sync between machines
+// git-sync      — remote git repo for config versioning
 
-output A {
+ports {
+    a desk
+    b laptop
+}
+
+machine desk {
     // remap {
     //     key capslock esc          // remap a key
     //     modifier lalt lctrl       // swap modifiers
@@ -34,9 +40,14 @@ output A {
             // swap  n               // caps+N → switch to other output
         }
     }
+
+    // skip {
+    //     app "hammerspoon"         // don't sync this app to this machine
+    // }
 }
 
-output B {}
+machine laptop {
+}
 
 sync {
     // app "fish"
@@ -166,10 +177,10 @@ impl Default for CapsLayer {
     }
 }
 
-// ── Per-output config ─────────────────────────────────────────────────────────
+// ── Per-machine config ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputDaemonConfig {
+pub struct MachineConfig {
     #[serde(default = "default_actions")]
     pub virtual_actions: Vec<VirtualAction>,
     #[serde(default)]
@@ -178,22 +189,32 @@ pub struct OutputDaemonConfig {
     pub modifier_remaps: Vec<ModifierRemap>,
     #[serde(default)]
     pub caps_layer: CapsLayer,
+    /// Apps that should NOT be synced to this machine (still stored in git and
+    /// synced to other machines).
+    #[serde(default)]
+    pub skip: Vec<String>,
 }
 
 fn default_actions() -> Vec<VirtualAction> {
     vec![VirtualAction::Unset; DUALIE_VKEY_COUNT]
 }
 
-impl Default for OutputDaemonConfig {
+impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             virtual_actions: default_actions(),
             key_remaps:      Vec::new(),
             modifier_remaps: Vec::new(),
             caps_layer:      CapsLayer::default(),
+            skip:            Vec::new(),
         }
     }
 }
+
+/// Backwards-compat type alias so existing internal call sites still compile
+/// while we migrate.
+#[allow(dead_code)]
+pub type OutputDaemonConfig = MachineConfig;
 
 // ── Sync config ───────────────────────────────────────────────────────────────
 
@@ -247,8 +268,12 @@ pub struct GitSyncConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DualieConfig {
+    /// Maps port index (0=A, 1=B) to a machine name.
     #[serde(default)]
-    pub outputs: [OutputDaemonConfig; 2],
+    pub ports: [Option<String>; 2],
+    /// Per-machine configs, keyed by machine name.
+    #[serde(default)]
+    pub machines: HashMap<String, MachineConfig>,
     #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
@@ -258,7 +283,8 @@ pub struct DualieConfig {
 impl Default for DualieConfig {
     fn default() -> Self {
         Self {
-            outputs:  [OutputDaemonConfig::default(), OutputDaemonConfig::default()],
+            ports:    [None, None],
+            machines: HashMap::new(),
             sync:     SyncConfig::default(),
             git_sync: GitSyncConfig::default(),
         }
@@ -266,6 +292,22 @@ impl Default for DualieConfig {
 }
 
 impl DualieConfig {
+    /// Resolve port index (0=A, 1=B) to the machine config for that port.
+    /// Returns `None` if the port has no machine assigned or the machine name
+    /// isn't found in `machines`.
+    pub fn resolve_port(&self, port_idx: usize) -> Option<&MachineConfig> {
+        self.ports.get(port_idx)
+            .and_then(|opt| opt.as_deref())
+            .and_then(|name| self.machines.get(name))
+    }
+
+    /// Returns `true` if `machine_name` has `app_name` in its `skip` list.
+    pub fn machine_skips(&self, machine_name: &str, app_name: &str) -> bool {
+        self.machines.get(machine_name)
+            .map(|m| m.skip.iter().any(|s| s == app_name))
+            .unwrap_or(false)
+    }
+
     // ── I/O ──────────────────────────────────────────────────────────────────
 
     /// Load config: try `dualie.kdl`, then legacy `config.json`, then default.
@@ -357,17 +399,29 @@ impl DualieConfig {
 
         for node in doc.nodes() {
             match node.name().value() {
-                "output" => {
-                    let label = kdl_arg_str(node, 0)
-                        .ok_or_else(|| anyhow::anyhow!("output requires identifier A or B"))?;
-                    let idx = match label {
-                        "A" => 0usize,
-                        "B" => 1usize,
-                        other => bail!("unknown output {other:?}; expected A or B"),
-                    };
+                "ports" => {
                     if let Some(children) = node.children() {
-                        parse_output(children, &mut cfg.outputs[idx])?;
+                        for child in children.nodes() {
+                            let port = child.name().value();
+                            let machine = kdl_arg_str(child, 0)
+                                .ok_or_else(|| anyhow::anyhow!("ports.{port}: requires a machine name argument"))?;
+                            match port {
+                                "a" | "A" => cfg.ports[0] = Some(machine.to_owned()),
+                                "b" | "B" => cfg.ports[1] = Some(machine.to_owned()),
+                                other => bail!("ports: unknown port {other:?}; expected a or b"),
+                            }
+                        }
                     }
+                }
+                "machine" => {
+                    let name = kdl_arg_str(node, 0)
+                        .ok_or_else(|| anyhow::anyhow!("machine requires a name argument"))?
+                        .to_owned();
+                    let mut mc = MachineConfig::default();
+                    if let Some(children) = node.children() {
+                        parse_machine(children, &mut mc)?;
+                    }
+                    cfg.machines.insert(name, mc);
                 }
                 "sync" => {
                     if let Some(children) = node.children() {
@@ -389,6 +443,18 @@ impl DualieConfig {
             }
         }
 
+        // Validate: each port that names a machine must exist in machines.
+        for (port_label, port_name) in [("a", &cfg.ports[0]), ("b", &cfg.ports[1])] {
+            if let Some(name) = port_name {
+                if !cfg.machines.contains_key(name.as_str()) {
+                    bail!(
+                        "ports.{port_label}: machine {name:?} not defined; \
+                         add `machine {name} {{ }}` to dualie.kdl"
+                    );
+                }
+            }
+        }
+
         Ok(cfg)
     }
 
@@ -403,9 +469,27 @@ impl DualieConfig {
              // Modifiers: lctrl lshift lalt lmeta rctrl rshift ralt rmeta\n\n"
         );
 
-        for (i, out) in self.outputs.iter().enumerate() {
-            let label = if i == 0 { "A" } else { "B" };
-            s.push_str(&format!("output {label} {{\n"));
+        // ports block
+        let has_ports = self.ports.iter().any(|p| p.is_some());
+        if has_ports {
+            s.push_str("ports {\n");
+            for (i, port) in self.ports.iter().enumerate() {
+                let label = if i == 0 { "a" } else { "b" };
+                if let Some(name) = port {
+                    s.push_str(&format!("    {label} {name}\n"));
+                }
+            }
+            s.push_str("}\n\n");
+        }
+
+        // machine blocks — iterate in insertion order (HashMap is non-deterministic;
+        // sort for stable output)
+        let mut machine_names: Vec<&str> = self.machines.keys().map(|k| k.as_str()).collect();
+        machine_names.sort();
+
+        for name in machine_names {
+            let out = &self.machines[name];
+            s.push_str(&format!("machine {name} {{\n"));
 
             // actions block (non-Unset only)
             let non_unset: Vec<(usize, &VirtualAction)> = out.virtual_actions.iter()
@@ -505,6 +589,15 @@ impl DualieConfig {
                     }
                 }
                 s.push_str("        }\n");
+                s.push_str("    }\n");
+            }
+
+            // skip block
+            if !out.skip.is_empty() {
+                s.push_str("    skip {\n");
+                for app in &out.skip {
+                    s.push_str(&format!("        app {app:?}\n"));
+                }
                 s.push_str("    }\n");
             }
 
@@ -624,27 +717,40 @@ fn parse_sync(doc: &KdlDocument, sync: &mut SyncConfig) -> Result<()> {
     Ok(())
 }
 
-// ── Output block parser ───────────────────────────────────────────────────────
+// ── Machine block parser ──────────────────────────────────────────────────────
 
-fn parse_output(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+fn parse_machine(doc: &KdlDocument, mc: &mut MachineConfig) -> Result<()> {
     for node in doc.nodes() {
         match node.name().value() {
             "actions" => {
                 if let Some(children) = node.children() {
-                    parse_actions(children, out)?;
+                    parse_actions(children, mc)?;
                 }
             }
             "remap" => {
                 if let Some(children) = node.children() {
-                    parse_remap(children, out)?;
+                    parse_remap(children, mc)?;
                 }
             }
             "layers" => {
                 if let Some(children) = node.children() {
-                    parse_layers(children, out)?;
+                    parse_layers(children, mc)?;
                 }
             }
-            other => tracing::warn!("unknown output node: {other}"),
+            "skip" => {
+                if let Some(children) = node.children() {
+                    for child in children.nodes() {
+                        if child.name().value() == "app" {
+                            if let Some(s) = kdl_arg_str(child, 0) {
+                                mc.skip.push(s.to_owned());
+                            }
+                        } else {
+                            tracing::warn!("machine skip: unknown node {:?}", child.name().value());
+                        }
+                    }
+                }
+            }
+            other => tracing::warn!("unknown machine node: {other}"),
         }
     }
     Ok(())
@@ -652,7 +758,7 @@ fn parse_output(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
 
 // ── Actions parser ────────────────────────────────────────────────────────────
 
-fn parse_actions(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+fn parse_actions(doc: &KdlDocument, out: &mut MachineConfig) -> Result<()> {
     let mut slot = 0usize;
     for node in doc.nodes() {
         if slot >= DUALIE_VKEY_COUNT {
@@ -683,7 +789,7 @@ fn parse_actions(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> 
 
 // ── Remap parser ──────────────────────────────────────────────────────────────
 
-fn parse_remap(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+fn parse_remap(doc: &KdlDocument, out: &mut MachineConfig) -> Result<()> {
     for node in doc.nodes() {
         match node.name().value() {
             "key" => {
@@ -715,7 +821,7 @@ fn parse_remap(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
 
 // ── Layers parser ─────────────────────────────────────────────────────────────
 
-fn parse_layers(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+fn parse_layers(doc: &KdlDocument, out: &mut MachineConfig) -> Result<()> {
     for node in doc.nodes() {
         match node.name().value() {
             "caps" => {
@@ -731,7 +837,7 @@ fn parse_layers(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
     Ok(())
 }
 
-fn parse_caps(doc: &KdlDocument, out: &mut OutputDaemonConfig) -> Result<()> {
+fn parse_caps(doc: &KdlDocument, out: &mut MachineConfig) -> Result<()> {
     for node in doc.nodes() {
         let name = node.name().value();
 
@@ -1187,7 +1293,12 @@ mod tests {
     use super::*;
 
     const EXAMPLE_KDL: &str = r#"
-output A {
+ports {
+    a desk
+    b laptop
+}
+
+machine desk {
     actions {
         launch "Slack" app-id="com.tinyspeck.slackmacgap"
         shell  "Terminal" command="open -a Terminal"
@@ -1212,17 +1323,18 @@ output A {
     }
 }
 
-output B {}
+machine laptop {}
 "#;
 
     #[test]
     fn parse_actions() {
         let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
-        assert_eq!(cfg.outputs[0].virtual_actions[0], VirtualAction::AppLaunch {
+        let mc = cfg.resolve_port(0).expect("port 0 should resolve");
+        assert_eq!(mc.virtual_actions[0], VirtualAction::AppLaunch {
             app_id: "com.tinyspeck.slackmacgap".into(),
             label:  "Slack".into(),
         });
-        assert_eq!(cfg.outputs[0].virtual_actions[1], VirtualAction::ShellCommand {
+        assert_eq!(mc.virtual_actions[1], VirtualAction::ShellCommand {
             command: "open -a Terminal".into(),
             label:   "Terminal".into(),
         });
@@ -1231,7 +1343,8 @@ output B {}
     #[test]
     fn parse_remap() {
         let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
-        let kr = &cfg.outputs[0].key_remaps;
+        let mc = cfg.resolve_port(0).expect("port 0 should resolve");
+        let kr = &mc.key_remaps;
         assert_eq!(kr.len(), 2);
         // "esc" → 0x29, "backspace" → 0x2A
         assert_eq!(kr[0].src_keycode, 0x29);
@@ -1240,7 +1353,7 @@ output B {}
         assert_eq!(kr[1].src_keycode, 0x39);
         assert_eq!(kr[1].dst_keycode, 0x29);
         // modifier lalt → rctrl
-        let mr = &cfg.outputs[0].modifier_remaps;
+        let mr = &mc.modifier_remaps;
         assert_eq!(mr[0].src, 0x04); // lalt
         assert_eq!(mr[0].dst, 0x10); // rctrl
     }
@@ -1248,7 +1361,8 @@ output B {}
     #[test]
     fn parse_caps_layer() {
         let cfg = DualieConfig::from_kdl(EXAMPLE_KDL).expect("parse");
-        let cl = &cfg.outputs[0].caps_layer;
+        let mc = cfg.resolve_port(0).expect("port 0 should resolve");
+        let cl = &mc.caps_layer;
         assert_eq!(cl.entries.len(), 7);
 
         // chord a e  → src=a, dst=[e], mod=0
@@ -1287,19 +1401,19 @@ output B {}
     }
 
     #[test]
-    fn bare_output_identifier() {
-        // KDL v2 allows unquoted identifiers as values: `output A { }`
-        let src = "output A {}\noutput B {}";
-        match DualieConfig::from_kdl(src) {
-            Ok(_) => { /* great — bare identifiers work */ }
-            Err(e) => {
-                // If the kdl crate rejects bare identifiers, require quoted form
-                let src_quoted = r#"output "A" {}
-output "B" {}"#;
-                DualieConfig::from_kdl(src_quoted).expect("quoted form must parse");
-                eprintln!("note: bare 'output A' not supported by this kdl version ({e}); use output \"A\"");
-            }
-        }
+    fn machine_and_ports_parse() {
+        let src = "ports {\n    a desk\n    b laptop\n}\nmachine desk {}\nmachine laptop {}";
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        assert_eq!(cfg.ports[0].as_deref(), Some("desk"));
+        assert_eq!(cfg.ports[1].as_deref(), Some("laptop"));
+        assert!(cfg.machines.contains_key("desk"));
+        assert!(cfg.machines.contains_key("laptop"));
+    }
+
+    #[test]
+    fn ports_referencing_unknown_machine_is_error() {
+        let src = "ports { a ghost }\nmachine desk {}";
+        assert!(DualieConfig::from_kdl(src).is_err(), "unknown machine should error");
     }
 
     #[test]
@@ -1307,8 +1421,9 @@ output "B" {}"#;
         let original = DualieConfig::default();
         let kdl = original.to_kdl_string();
         let restored = DualieConfig::from_kdl(&kdl).expect("parse roundtrip");
-        assert!(restored.outputs[0].key_remaps.is_empty());
-        assert!(restored.outputs[0].virtual_actions.iter().all(|a| *a == VirtualAction::Unset));
+        // Default config has no ports or machines.
+        assert!(restored.ports[0].is_none());
+        assert!(restored.machines.is_empty());
     }
 
     #[test]
@@ -1341,43 +1456,33 @@ output "B" {}"#;
         let restored = DualieConfig::from_kdl(&kdl)
             .unwrap_or_else(|e| panic!("re-parse after to_kdl_string failed:\n{e}\n\nKDL:\n{kdl}"));
 
+        let orig_mc = original.resolve_port(0).expect("port 0 should resolve");
+        let rest_mc = restored.resolve_port(0).expect("port 0 should resolve after roundtrip");
+
         // Key remaps preserved
-        assert_eq!(
-            original.outputs[0].key_remaps.len(),
-            restored.outputs[0].key_remaps.len(),
-            "key remap count mismatch"
-        );
-        for (a, b) in original.outputs[0].key_remaps.iter()
-            .zip(restored.outputs[0].key_remaps.iter())
-        {
+        assert_eq!(orig_mc.key_remaps.len(), rest_mc.key_remaps.len(), "key remap count mismatch");
+        for (a, b) in orig_mc.key_remaps.iter().zip(rest_mc.key_remaps.iter()) {
             assert_eq!(a.src_keycode, b.src_keycode, "src_keycode mismatch");
             assert_eq!(a.dst_keycode, b.dst_keycode, "dst_keycode mismatch");
         }
 
         // Modifier remaps preserved
-        assert_eq!(
-            original.outputs[0].modifier_remaps.len(),
-            restored.outputs[0].modifier_remaps.len(),
-        );
+        assert_eq!(orig_mc.modifier_remaps.len(), rest_mc.modifier_remaps.len());
 
         // Caps layer entries preserved
         assert_eq!(
-            original.outputs[0].caps_layer.entries.len(),
-            restored.outputs[0].caps_layer.entries.len(),
+            orig_mc.caps_layer.entries.len(),
+            rest_mc.caps_layer.entries.len(),
             "caps layer entry count mismatch"
         );
-        for (a, b) in original.outputs[0].caps_layer.entries.iter()
-            .zip(restored.outputs[0].caps_layer.entries.iter())
-        {
+        for (a, b) in orig_mc.caps_layer.entries.iter().zip(rest_mc.caps_layer.entries.iter()) {
             assert_eq!(a.entry_type,  b.entry_type,  "entry_type mismatch");
             assert_eq!(a.src_keycode, b.src_keycode, "src_keycode mismatch");
         }
 
         // Action labels preserved
-        let orig_labels: Vec<_> = original.outputs[0].virtual_actions.iter()
-            .filter_map(|a| a.label()).collect();
-        let rest_labels: Vec<_> = restored.outputs[0].virtual_actions.iter()
-            .filter_map(|a| a.label()).collect();
+        let orig_labels: Vec<_> = orig_mc.virtual_actions.iter().filter_map(|a| a.label()).collect();
+        let rest_labels: Vec<_> = rest_mc.virtual_actions.iter().filter_map(|a| a.label()).collect();
         assert_eq!(orig_labels, rest_labels, "action labels mismatch");
     }
 
@@ -1389,8 +1494,6 @@ output "B" {}"#;
 git-sync {
     remote "git@github.com:user/configs.git"
 }
-output A {}
-output B {}
 "#;
         let cfg = DualieConfig::from_kdl(src).expect("parse");
         assert_eq!(
@@ -1401,7 +1504,7 @@ output B {}
 
     #[test]
     fn git_sync_absent_defaults_to_none() {
-        let cfg = DualieConfig::from_kdl("output A {}\noutput B {}").expect("parse");
+        let cfg = DualieConfig::from_kdl("").expect("parse");
         assert!(cfg.git_sync.remote.is_none());
     }
 
@@ -1447,15 +1550,16 @@ local {
     }
 
     #[test]
-    fn unknown_output_label_errors() {
-        let src = r#"output C {}"#;
-        assert!(DualieConfig::from_kdl(src).is_err());
+    fn unknown_port_label_errors() {
+        // port "c" is not valid — only a and b
+        let src = "ports {\n    c desk\n}\nmachine desk {}";
+        assert!(DualieConfig::from_kdl(src).is_err(), "unknown port should error");
     }
 
     #[test]
     fn invalid_kdl_syntax_errors() {
         // Missing closing brace
-        let src = "output A {\n    remap {\n        key esc backspace\n";
+        let src = "machine desk {\n    remap {\n        key esc backspace\n";
         assert!(DualieConfig::from_kdl(src).is_err());
     }
 

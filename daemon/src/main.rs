@@ -95,7 +95,10 @@ async fn main() -> Result<()> {
     status::spawn();
 
     // ── File sync (Phase 6) ───────────────────────────────────────────────────
-    file_sync::spawn(cfg_rx.clone(), serial_client.clone());
+    {
+        let local_for_sync = config::LocalConfig::load();
+        file_sync::spawn(cfg_rx.clone(), serial_client.clone(), local_for_sync.machine_name);
+    }
 
     // ── Active output state (shared between serial peer and intercept) ────────
     let active_output = intercept::new_active_output();

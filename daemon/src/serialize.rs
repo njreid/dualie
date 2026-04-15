@@ -93,17 +93,19 @@ pub fn config_to_bytes(cfg: &DualieConfig) -> Vec<u8> {
     }
 
     // ── Caps layers (offset 324, 2 × 260 bytes) ───────────────────────────────
-    for (out_idx, output) in cfg.outputs.iter().enumerate() {
+    for out_idx in 0..2usize {
         let layer_off = 324 + out_idx * 260;
-        buf[layer_off] = output.caps_layer.unmapped_passthrough as u8;
-        // _pad[3] already 0
-
-        for (e_idx, entry) in output.caps_layer.entries.iter()
-            .take(CAPS_LAYER_MAX)
-            .enumerate()
-        {
-            write_caps_entry(&mut buf, layer_off + 4 + e_idx * 8, entry);
+        if let Some(output) = cfg.resolve_port(out_idx) {
+            buf[layer_off] = output.caps_layer.unmapped_passthrough as u8;
+            // _pad[3] already 0
+            for (e_idx, entry) in output.caps_layer.entries.iter()
+                .take(CAPS_LAYER_MAX)
+                .enumerate()
+            {
+                write_caps_entry(&mut buf, layer_off + 4 + e_idx * 8, entry);
+            }
         }
+        // If no machine is assigned to this port, the layer stays zeroed.
     }
 
     // ── Checksum (offset 844) ─────────────────────────────────────────────────
@@ -144,7 +146,8 @@ fn write_caps_entry(buf: &mut [u8], offset: usize, e: &CapsLayerEntry) {
 fn merge_key_remaps(cfg: &DualieConfig) -> Vec<KeyRemap> {
     let mut out: Vec<KeyRemap> = Vec::new();
 
-    for (out_idx, output) in cfg.outputs.iter().enumerate() {
+    for out_idx in 0..2usize {
+        let Some(output) = cfg.resolve_port(out_idx) else { continue };
         let mask = 1u8 << out_idx;
 
         // ── Regular key remaps ────────────────────────────────────────────
@@ -229,7 +232,7 @@ mod tests {
 
     #[test]
     fn key_remap_at_correct_offset() {
-        use crate::config::{KeyRemap, DualieConfig};
+        use crate::config::{KeyRemap, MachineConfig, DualieConfig};
 
         let remap = KeyRemap {
             src_keycode:  0x04,
@@ -240,7 +243,10 @@ mod tests {
             flags:        0,
         };
         let mut cfg = DualieConfig::default();
-        cfg.outputs[0].key_remaps = vec![remap];
+        let mut mc = MachineConfig::default();
+        mc.key_remaps = vec![remap];
+        cfg.machines.insert("desk".into(), mc);
+        cfg.ports[0] = Some("desk".into());
 
         let bytes = config_to_bytes(&cfg);
 
@@ -255,7 +261,7 @@ mod tests {
 
     #[test]
     fn caps_layer_at_correct_offset() {
-        use crate::config::{CapsLayerEntry, CAPS_ENTRY_CHORD, DualieConfig};
+        use crate::config::{CapsLayerEntry, MachineConfig, CAPS_ENTRY_CHORD, DualieConfig};
 
         let entry = CapsLayerEntry {
             src_keycode:  0x10,
@@ -266,7 +272,10 @@ mod tests {
             vaction_idx:  0,
         };
         let mut cfg = DualieConfig::default();
-        cfg.outputs[0].caps_layer.entries = vec![entry];
+        let mut mc = MachineConfig::default();
+        mc.caps_layer.entries = vec![entry];
+        cfg.machines.insert("desk".into(), mc);
+        cfg.ports[0] = Some("desk".into());
 
         let bytes = config_to_bytes(&cfg);
 
@@ -312,8 +321,14 @@ mod tests {
 
         // Same remap in both outputs → merged with output_mask = 3
         let mut cfg = DualieConfig::default();
-        cfg.outputs[0].key_remaps = vec![make_remap(1)];
-        cfg.outputs[1].key_remaps = vec![make_remap(2)];
+        let mut mc_a = crate::config::MachineConfig::default();
+        let mut mc_b = crate::config::MachineConfig::default();
+        mc_a.key_remaps = vec![make_remap(1)];
+        mc_b.key_remaps = vec![make_remap(2)];
+        cfg.machines.insert("desk".into(), mc_a);
+        cfg.machines.insert("laptop".into(), mc_b);
+        cfg.ports[0] = Some("desk".into());
+        cfg.ports[1] = Some("laptop".into());
 
         let merged = merge_key_remaps(&cfg);
         assert_eq!(merged.len(), 1, "should deduplicate to 1 entry");
@@ -321,7 +336,10 @@ mod tests {
 
         // Remap only in output 1 → output_mask = 2
         let mut cfg2 = DualieConfig::default();
-        cfg2.outputs[1].key_remaps = vec![make_remap(2)];
+        let mut mc_b2 = crate::config::MachineConfig::default();
+        mc_b2.key_remaps = vec![make_remap(2)];
+        cfg2.machines.insert("laptop".into(), mc_b2);
+        cfg2.ports[1] = Some("laptop".into());
 
         let merged2 = merge_key_remaps(&cfg2);
         assert_eq!(merged2.len(), 1);

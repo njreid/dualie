@@ -45,7 +45,9 @@ use dualie_proto::{DualieMessage, FileChunk};
 /// Watches all files belonging to apps enabled in the sync config.
 /// On file change: sends a `SyncChunk` over serial.
 /// On incoming `SyncChunk`: applies LWW, writes if needed, sends `SyncAck`.
-pub fn spawn(cfg_rx: watch::Receiver<DualieConfig>, serial: SerialClient) {
+/// `local_machine` is the name of this machine (from `local.kdl`); it is used
+/// to skip incoming files for apps in this machine's `skip {}` list.
+pub fn spawn(cfg_rx: watch::Receiver<DualieConfig>, serial: SerialClient, local_machine: String) {
     let serial_for_recv = serial.clone();
 
     // Channel for inbound SyncChunk / SyncAck messages from the peer dispatch loop.
@@ -53,7 +55,7 @@ pub fn spawn(cfg_rx: watch::Receiver<DualieConfig>, serial: SerialClient) {
     CHUNK_SENDER.set(chunk_tx).ok();
 
     tokio::spawn(async move {
-        run_watcher(cfg_rx, serial, chunk_rx).await;
+        run_watcher(cfg_rx, serial, chunk_rx, local_machine).await;
     });
 
     let _ = serial_for_recv; // used via the global sender above
@@ -74,9 +76,10 @@ static CHUNK_SENDER: once_cell::sync::OnceCell<tokio::sync::mpsc::Sender<DualieM
 // ── Watcher task ──────────────────────────────────────────────────────────────
 
 async fn run_watcher(
-    mut cfg_rx: watch::Receiver<DualieConfig>,
-    serial:     SerialClient,
+    mut cfg_rx:   watch::Receiver<DualieConfig>,
+    serial:       SerialClient,
     mut chunk_rx: tokio::sync::mpsc::Receiver<DualieMessage>,
+    local_machine: String,
 ) {
     // Channel from the notify thread into the async task.
     let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
@@ -117,7 +120,10 @@ async fn run_watcher(
             Some(msg) = chunk_rx.recv() => {
                 match msg {
                     DualieMessage::SyncChunk(chunk) => {
-                        if let Err(e) = receive_chunk(chunk, &serial).await {
+                        let cfg = cfg_rx.borrow().clone();
+                        if path_skipped_by_machine(&chunk.rel_path, &cfg, &local_machine) {
+                            info!("sync: skipping {} (in skip list for {local_machine})", chunk.rel_path);
+                        } else if let Err(e) = receive_chunk(chunk, &serial).await {
                             warn!("sync: receive_chunk error: {e}");
                         }
                     }
@@ -292,6 +298,29 @@ async fn write_file(path: &Path, data: &[u8]) -> Result<()> {
     }
     tokio::fs::write(path, data).await
         .with_context(|| format!("writing {}", path.display()))
+}
+
+// ── Skip check ────────────────────────────────────────────────────────────────
+
+/// Returns `true` if the local machine's `skip {}` list covers the app that
+/// owns `rel_path`.  Loads the app registry to reverse-lookup the path.
+fn path_skipped_by_machine(rel_path: &str, cfg: &crate::config::DualieConfig, machine_name: &str) -> bool {
+    let Some(machine) = cfg.machines.get(machine_name) else { return false };
+    if machine.skip.is_empty() { return false; }
+
+    let Ok(registry) = AppRegistry::load() else { return false };
+    let abs_path = expand_home_relative(rel_path);
+
+    for skipped_app in &machine.skip {
+        if let Some(app) = registry.get(skipped_app) {
+            for app_path in app.expand_globs() {
+                if app_path == abs_path {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
