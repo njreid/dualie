@@ -496,6 +496,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "dua"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "directories",
+ "dualie-proto",
+ "glob",
+ "kdl",
+ "ratatui",
+ "tokio",
+]
+
+[[package]]
 name = "dualie"
 version = "0.1.0"
 dependencies = [
@@ -556,21 +571,6 @@ dependencies = [
  "tokio-serial",
  "tracing",
  "udev",
-]
-
-[[package]]
-name = "dualie-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "directories",
- "dualie-proto",
- "glob",
- "kdl",
- "ratatui",
- "tokio",
 ]
 
 [[package]]

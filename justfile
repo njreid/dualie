@@ -81,9 +81,9 @@ flash: firmware-build
 
 # ── Daemon ────────────────────────────────────────────────────────────────────
 
-# Build the daemon binary
+# Build the daemon binary and dua CLI/TUI
 daemon-build:
-    cargo build --release -p dualie
+    cargo build --release -p dualie -p dua
 
 # Run the daemon
 daemon-run:
@@ -107,12 +107,13 @@ test: firmware-test daemon-test
 
 # ── Install / uninstall ───────────────────────────────────────────────────────
 
-# Install daemon binary to ~/.local/bin and register the user service
+# Install daemon binary and dua CLI/TUI to ~/.local/bin, register the user service
 install: daemon-build
     #!/usr/bin/env bash
     set -e
     DUALIE_BIN="${HOME}/.local/bin/dualie"
     install -Dm755 target/release/dualie "${DUALIE_BIN}"
+    install -Dm755 target/release/dua "${HOME}/.local/bin/dua"
     if [[ "$(uname)" == "Darwin" ]]; then
         PLIST_DEST="${HOME}/Library/LaunchAgents/dev.dualie.plist"
         mkdir -p "${HOME}/Library/LaunchAgents"
@@ -145,5 +146,5 @@ uninstall:
         systemctl --user disable --now dualie.service 2>/dev/null || true
         rm -f "${HOME}/.config/systemd/user/dualie.service"
     fi
-    rm -f "${HOME}/.local/bin/dualie"
+    rm -f "${HOME}/.local/bin/dualie" "${HOME}/.local/bin/dua"
     echo "Uninstalled."

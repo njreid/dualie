@@ -1,6 +1,13 @@
-/// dualie-tui — Terminal UI for the Dualie daemon.
+/// dua — Dualie TUI and CLI client.
 ///
-/// Tabs:
+/// With no subcommand: opens the interactive terminal UI.
+///
+/// Subcommands:
+///   status   Print daemon status to stdout
+///   pull     Pull config from the git remote
+///   push     Push config to the git remote
+///
+/// TUI tabs:
 ///   1  Status      — live daemon status polled from the Unix socket
 ///   2  Remaps      — key and modifier remaps for the selected output
 ///   3  Caps layer  — caps-layer binding table for the selected output
@@ -14,7 +21,7 @@ mod ui;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -28,12 +35,25 @@ use ipc::DaemonStatus;
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Dualie terminal UI")]
+#[command(name = "dua", version, about = "Dualie — KVM switch control")]
 struct Args {
     /// Path to the daemon status socket.
     /// Defaults to $XDG_RUNTIME_DIR/dualie/daemon.sock.
     #[arg(long)]
     socket: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Print daemon status
+    Status,
+    /// Pull config from the git remote
+    Pull,
+    /// Push config to the git remote
+    Push,
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -388,20 +408,103 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    match args.command {
+        None => {
+            // No subcommand — open the TUI.
+            enable_raw_mode()?;
+            let mut stdout = std::io::stdout();
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+            let backend = CrosstermBackend::new(stdout);
+            let mut terminal = Terminal::new(backend)?;
+            let result = run_app(&mut terminal, socket_path).await;
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+            terminal.show_cursor()?;
+            if let Err(e) = result {
+                eprintln!("Error: {e:#}");
+            }
+        }
+        Some(Cmd::Status) => {
+            cmd_status(&socket_path)?;
+        }
+        Some(Cmd::Pull) => {
+            cmd_git(&socket_path, &["pull", "--rebase", "origin", "main"], "pull")?;
+        }
+        Some(Cmd::Push) => {
+            cmd_git(&socket_path, &["push", "origin", "main"], "push")?;
+        }
+    }
+    Ok(())
+}
 
-    let result = run_app(&mut terminal, socket_path).await;
+fn cmd_status(socket_path: &str) -> Result<()> {
+    match ipc::query_status(socket_path) {
+        Ok(s) => {
+            let serial = &s.serial;
+            let git = if s.git_pending > 0 {
+                format!("{} commit(s) to pull", s.git_pending)
+            } else {
+                "up to date".into()
+            };
+            println!("Serial:  {serial}");
+            println!("Git:     {git}");
+            if !s.repo_dir.is_empty() {
+                println!("Repo:    {}", s.repo_dir);
+            }
+        }
+        Err(e) => {
+            eprintln!("daemon unavailable: {e}");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
+fn cmd_git(socket_path: &str, git_args: &[&str], op: &str) -> Result<()> {
+    let repo_dir = match ipc::query_status(socket_path) {
+        Ok(s) if !s.repo_dir.is_empty() => s.repo_dir,
+        Ok(_) => {
+            eprintln!("No repo dir — is git configured in dualie.kdl?");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("daemon unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
 
-    if let Err(e) = result {
-        eprintln!("Error: {e:#}");
+    let out = std::process::Command::new("git")
+        .arg("-C").arg(&repo_dir)
+        .args(git_args)
+        .output()?;
+
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let msg = stdout.trim();
+        if msg.is_empty() {
+            println!("Git {op} complete.");
+        } else {
+            println!("{msg}");
+        }
+
+        // After a pull: copy repo file → live config so daemon hot-reloads.
+        if op == "pull" {
+            let repo_kdl = std::path::Path::new(&repo_dir)
+                .join("dualie").join("dualie.kdl");
+            if repo_kdl.exists() {
+                let config_path = kdl_config_path();
+                if let Some(parent) = config_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&repo_kdl, &config_path)?;
+                println!("Config updated.");
+            }
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let msg = stderr.trim();
+        eprintln!("Git {op} failed: {msg}");
+        std::process::exit(1);
     }
     Ok(())
 }

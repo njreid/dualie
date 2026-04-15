@@ -1,12 +1,12 @@
 [package]
-name        = "dualie-tui"
+name        = "dua"
 version     = "0.1.0"
 edition     = "2021"
-description = "Dualie TUI – live status and config editor"
+description = "Dualie – TUI and CLI client"
 license     = "GPL-3.0"
 
 [[bin]]
-name = "dualie-tui"
+name = "dua"
 path = "src/main.rs"
 
 [dependencies]
