@@ -14,9 +14,12 @@ use anyhow::Result;
 use dualie_proto::{DualieMessage, SerialPeer, SerialPeerWriter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
+
+use crate::config::DualieConfig;
+use crate::intercept::ActiveOutput;
 
 /// Delay used when the device exists but the connection attempt fails
 /// (e.g. permissions, protocol error) — avoids a busy-retry.
@@ -75,7 +78,12 @@ async fn tx_task(mut writer: SerialPeerWriter, mut rx: mpsc::Receiver<DualieMess
 
 // ── Inbound dispatch ──────────────────────────────────────────────────────────
 
-async fn dispatch(msg: DualieMessage, client: &SerialClient) {
+async fn dispatch(
+    msg: DualieMessage,
+    client: &SerialClient,
+    cfg_rx: &watch::Receiver<DualieConfig>,
+    active_output: &ActiveOutput,
+) {
     match msg {
         DualieMessage::Ping => {}
 
@@ -92,6 +100,15 @@ async fn dispatch(msg: DualieMessage, client: &SerialClient) {
 
         DualieMessage::VirtualAction { slot } => {
             info!(slot, "virtual action from RP2040");
+            let cfg = cfg_rx.borrow();
+            let port_idx = active_output.load(Ordering::Relaxed) as usize;
+            if let Some(machine) = cfg.resolve_port(port_idx) {
+                if let Some(action) = machine.virtual_actions.get(slot as usize) {
+                    crate::launch::fire(action);
+                } else {
+                    warn!(slot, "virtual action slot out of range");
+                }
+            }
         }
 
         DualieMessage::ActiveOutput { output } => {
@@ -136,7 +153,12 @@ async fn dispatch(msg: DualieMessage, client: &SerialClient) {
 
 // ── Single connection lifecycle ───────────────────────────────────────────────
 
-async fn run_once(serial_path: &str, client: &SerialClient) -> Result<()> {
+async fn run_once(
+    serial_path: &str,
+    client: &SerialClient,
+    cfg_rx: &watch::Receiver<DualieConfig>,
+    active_output: &ActiveOutput,
+) -> Result<()> {
     info!(serial_path, "opening CDC-ACM serial connection");
 
     let peer = SerialPeer::open(std::path::Path::new(serial_path))?;
@@ -151,7 +173,7 @@ async fn run_once(serial_path: &str, client: &SerialClient) -> Result<()> {
 
     loop {
         let msg = reader.recv().await?;
-        dispatch(msg, client).await;
+        dispatch(msg, client, cfg_rx, active_output).await;
     }
 }
 
@@ -248,13 +270,17 @@ fn wait_udev_tty(path: &str) -> Result<()> {
 // ── Background reconnect loop ─────────────────────────────────────────────────
 
 /// Spawn the serial peer as a background task.  Returns a `SerialClient` handle.
-pub fn spawn(serial_path: String) -> SerialClient {
+pub fn spawn(
+    serial_path: String,
+    cfg_rx: watch::Receiver<DualieConfig>,
+    active_output: ActiveOutput,
+) -> SerialClient {
     let client = SerialClient::new();
     let client_bg = client.clone();
 
     tokio::spawn(async move {
         loop {
-            match run_once(&serial_path, &client_bg).await {
+            match run_once(&serial_path, &client_bg, &cfg_rx, &active_output).await {
                 Ok(_)  => info!("serial connection closed cleanly"),
                 Err(e) => error!("serial connection error: {e:#}"),
             }

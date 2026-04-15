@@ -61,9 +61,10 @@ pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::Com
 }
 
 /// Dispatch the side-effects of a `ProcessResult` — output switch, clipboard
-/// pull, and virtual-action logging — identically on every platform.
+/// pull, and virtual-action execution — identically on every platform.
 pub fn dispatch_result(
     result: &remap::ProcessResult,
+    cfg: &crate::config::DualieConfig,
     active_output: &ActiveOutput,
     serial: &SerialClient,
 ) {
@@ -88,7 +89,15 @@ pub fn dispatch_result(
     }
 
     if let Some(slot) = result.fire_action {
-        info!("firing virtual action slot {slot}");
+        info!(slot, "firing virtual action");
+        let port_idx = active_output.load(Ordering::Relaxed) as usize;
+        if let Some(machine) = cfg.resolve_port(port_idx) {
+            if let Some(action) = machine.virtual_actions.get(slot as usize) {
+                crate::launch::fire(action);
+            } else {
+                tracing::warn!(slot, "virtual action slot out of range");
+            }
+        }
     }
 }
 

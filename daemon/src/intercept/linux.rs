@@ -192,7 +192,7 @@ fn keyboard_task(
 
             let result = process_key(hid, modifier_bit, value, &compiled, &mut state);
 
-            super::dispatch_result(&result, &active_output, &serial);
+            super::dispatch_result(&result, &cfg_snapshot, &active_output, &serial);
 
             // Inject synthetic key events into uinput.
             if !result.events.is_empty() {

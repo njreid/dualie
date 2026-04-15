@@ -8,6 +8,7 @@ mod config;
 mod file_sync;
 mod git_sync;
 mod intercept;
+mod launch;
 mod peer;
 mod serialize;
 mod status;
@@ -86,10 +87,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Active output state (shared between serial peer and intercept) ────────
+    let active_output = intercept::new_active_output();
+
     // ── Serial peer ───────────────────────────────────────────────────────────
     let serial_path = args.serial.unwrap_or_else(|| "/dev/ttyACM0".to_owned());
     info!("serial: {serial_path}");
-    let serial_client = peer::spawn(serial_path);
+    let serial_client = peer::spawn(serial_path, cfg_rx.clone(), active_output.clone());
 
     // ── Status socket ─────────────────────────────────────────────────────────
     status::spawn();
@@ -99,9 +103,6 @@ async fn main() -> Result<()> {
         let local_for_sync = config::LocalConfig::load();
         file_sync::spawn(cfg_rx.clone(), serial_client.clone(), local_for_sync.machine_name);
     }
-
-    // ── Active output state (shared between serial peer and intercept) ────────
-    let active_output = intercept::new_active_output();
 
     // ── Key interceptor (dedicated OS thread — evdev blocks) ─────────────────
     let cfg_for_intercept = cfg_rx.clone();

@@ -233,7 +233,7 @@ unsafe extern "C" fn value_available(
 
         let result = process_key(hid, modifier_bit, ev_value, &state.compiled, &mut state.layer);
 
-        super::dispatch_result(&result, &state.active_output, &state.serial);
+        super::dispatch_result(&result, &state.cfg_snapshot, &state.active_output, &state.serial);
 
         // ── Inject synthetic events via KVHD ──────────────────────────────────
 
