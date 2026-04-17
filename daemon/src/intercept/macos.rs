@@ -6,7 +6,7 @@
 ///
 /// Uses IOHIDManager to exclusively seize physical keyboards (equivalent to
 /// Linux `EVIOCGRAB`), processes events through `remap.rs`, and posts remapped
-/// HID boot-protocol reports to the Karabiner VirtualHIDDevice (KVHD).
+/// reports to the Karabiner VirtualHIDDevice daemon.
 ///
 /// ```text
 /// Physical key press
@@ -14,9 +14,9 @@
 ///   → IOHIDManager (kIOHIDOptionsTypeSeizeDevice)  ← our grab
 ///       ↓ raw HID usage codes — BEFORE IOHIDSystem modifier remapping
 ///   → remap.rs (process_key)
-///       ↓ 8-byte HID boot-protocol report
-///   → Karabiner VirtualHIDKeyboard (IOKit user client)
-///       ↓ virtual keyboard
+///       ↓ KvhdReport (67-byte pqrs format)
+///   → Karabiner-VirtualHIDDevice-Daemon (Unix datagram socket)
+///       ↓ virtual keyboard (DriverKit extension)
 ///   → IOHIDSystem → apps
 /// ```
 ///
@@ -26,8 +26,8 @@
 ///
 /// # Requirements
 ///
-/// - Karabiner-Elements must be installed and running (provides the virtual
-///   HID keyboard driver).
+/// - Karabiner-DriverKit-VirtualHIDDevice must be installed and its daemon
+///   running (does NOT require the Karabiner-Elements app).
 /// - The binary must have Accessibility permission (System Preferences →
 ///   Privacy & Security → Accessibility) for the exclusive device seize.
 ///
