@@ -386,7 +386,55 @@ impl App {
     }
 }
 
-// ── Config path (mirrors daemon logic) ───────────────────────────────────────
+// ── Config path and default template ─────────────────────────────────────────
+
+const DEFAULT_CONFIG: &str = r#"// dualie.kdl — Dualie configuration
+// Docs: https://github.com/njreid/dualie
+//
+// ports         — map physical output ports (a/b) to machine names
+// machine <n>   — per-machine key remaps, caps layer, and sync skip list
+// sync          — apps whose config files to sync between machines
+// git-sync      — remote git repo for config versioning
+
+ports {
+    a desk
+    b laptop
+}
+
+machine desk {
+    // remap {
+    //     key capslock esc          // remap a key
+    //     modifier lalt lctrl       // swap modifiers
+    // }
+
+    layers {
+        caps {
+            // chord h left          // caps+H → Left arrow
+            // chord l right         // caps+L → Right arrow
+            // chord k up
+            // chord j down
+            // swap  n               // caps+N → switch to other output
+        }
+    }
+
+    // skip {
+    //     app "hammerspoon"         // don't sync this app to this machine
+    // }
+}
+
+machine laptop {
+}
+
+sync {
+    // app "fish"
+    // app "neovim"
+    // app "git"
+}
+
+// git-sync {
+//     remote "git@github.com:you/dotfiles.git"
+// }
+"#;
 
 fn kdl_config_path() -> std::path::PathBuf {
     if let Some(proj) = directories::ProjectDirs::from("", "", "dualie") {
@@ -452,10 +500,21 @@ async fn main() -> Result<()> {
             cmd_list_apps(filter.as_deref())?;
         }
         Some(Cmd::Completions { shell }) => {
+            if shell == Shell::Fish {
+                // clap_complete doesn't emit a global file-completion disable.
+                // Without this, fish falls back to filename completion.
+                println!("complete -c dua -f");
+            }
             generate(shell, &mut Args::command(), "dua", &mut std::io::stdout());
         }
         Some(Cmd::Config) => {
             let path = kdl_config_path();
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, DEFAULT_CONFIG)?;
+            }
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
             std::process::Command::new(&editor).arg(&path).status()?;
         }
