@@ -161,6 +161,16 @@ extern "C" {
     static kCFRunLoopDefaultMode:            CFStringRef;
     static kCFTypeDictionaryKeyCallBacks:    c_void;
     static kCFTypeDictionaryValueCallBacks:  c_void;
+
+    static kCFBooleanTrue: *const c_void;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    // Returns true if the current process has Accessibility permission.
+    // When options contains kAXTrustedCheckOptionPrompt=true, macOS adds the
+    // app to System Settings → Accessibility and shows the authorisation prompt.
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
 }
 
 // ── Thread-local state ────────────────────────────────────────────────────────
@@ -259,6 +269,38 @@ unsafe extern "C" fn value_available(
     });
 }
 
+// ── Accessibility permission ──────────────────────────────────────────────────
+
+/// Check for Accessibility permission and prompt via the system dialog if not
+/// yet granted.  The prompt surfaces Dualie in System Settings → Accessibility
+/// so the user doesn't have to find the binary manually.
+fn request_accessibility_if_needed() {
+    // Build { kAXTrustedCheckOptionPrompt: kCFBooleanTrue }
+    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+    let trusted = unsafe {
+        let key = CFStringCreateWithCString(
+            kCFAllocatorDefault,
+            b"AXTrustedCheckOptionPrompt\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let opts = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 1,
+            &kCFTypeDictionaryKeyCallBacks as *const _ as *const c_void,
+            &kCFTypeDictionaryValueCallBacks as *const _ as *const c_void,
+        );
+        CFDictionaryAddValue(opts, key as *const c_void, kCFBooleanTrue);
+        CFRelease(key as *mut c_void);
+        let result = AXIsProcessTrustedWithOptions(opts);
+        CFRelease(opts as *mut c_void);
+        result
+    };
+    if trusted {
+        info!("macOS: Accessibility permission granted");
+    } else {
+        warn!("macOS: Accessibility permission not yet granted — approve in System Settings → Privacy & Security → Accessibility");
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Run the macOS keyboard interception loop.  Blocks until an error occurs.
@@ -267,6 +309,11 @@ pub fn run(
     serial:        SerialClient,
     active_output: ActiveOutput,
 ) -> Result<()> {
+    // Register with the Accessibility system and prompt the user if not yet
+    // granted.  This surfaces Dualie in System Settings → Privacy & Security →
+    // Accessibility without requiring the user to find the binary manually.
+    request_accessibility_if_needed();
+
     let kvhd = KvhdHandle::open()?;
     info!("macOS: Karabiner VirtualHIDKeyboard connected");
 
