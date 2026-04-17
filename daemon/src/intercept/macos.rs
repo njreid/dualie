@@ -129,15 +129,22 @@ extern "C" {
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
     fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
     fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
-
-    static kIOHIDDeviceUsagePageKey: CFStringRef;
-    static kIOHIDDeviceUsageKey:     CFStringRef;
 }
+
+// kIOHIDDeviceUsagePageKey / kIOHIDDeviceUsageKey are #define macros in
+// IOKit headers, not exported symbols.  Build CFString refs at runtime.
+const kIOHIDDeviceUsagePageKey_str: &[u8] = b"DeviceUsagePage\0";
+const kIOHIDDeviceUsageKey_str:     &[u8] = b"DeviceUsage\0";
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopRun();
+    fn CFStringCreateWithCString(
+        alloc:    CFAllocatorRef,
+        c_str:    *const u8,
+        encoding: u32,  // kCFStringEncodingUTF8 = 0x08000100
+    ) -> CFStringRef;
 
     fn CFDictionaryCreateMutable(
         allocator:     CFAllocatorRef,
@@ -298,8 +305,13 @@ pub fn run(
         let usage_num = kHIDUsage_GD_Keyboard as i32;
         let cf_page  = CFNumberCreate(kCFAllocatorDefault, 3, &page_num  as *const _ as *const c_void);
         let cf_usage = CFNumberCreate(kCFAllocatorDefault, 3, &usage_num as *const _ as *const c_void);
-        CFDictionaryAddValue(matching, kIOHIDDeviceUsagePageKey as *const c_void, cf_page);
-        CFDictionaryAddValue(matching, kIOHIDDeviceUsageKey     as *const c_void, cf_usage);
+        const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+        let key_page  = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDDeviceUsagePageKey_str.as_ptr(), kCFStringEncodingUTF8);
+        let key_usage = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDDeviceUsageKey_str.as_ptr(),     kCFStringEncodingUTF8);
+        CFDictionaryAddValue(matching, key_page  as *const c_void, cf_page);
+        CFDictionaryAddValue(matching, key_usage as *const c_void, cf_usage);
+        CFRelease(key_page as *mut c_void);
+        CFRelease(key_usage as *mut c_void);
         CFRelease(cf_page);
         CFRelease(cf_usage);
 

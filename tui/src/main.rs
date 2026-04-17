@@ -21,7 +21,8 @@ mod ui;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -60,6 +61,14 @@ enum Cmd {
         #[arg(value_name = "FILTER")]
         filter: Option<String>,
     },
+    /// Print shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Open the Dualie config file in $EDITOR
+    Config,
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -441,6 +450,14 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::ListApps { filter }) => {
             cmd_list_apps(filter.as_deref())?;
+        }
+        Some(Cmd::Completions { shell }) => {
+            generate(shell, &mut Args::command(), "dua", &mut std::io::stdout());
+        }
+        Some(Cmd::Config) => {
+            let path = kdl_config_path();
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+            std::process::Command::new(&editor).arg(&path).status()?;
         }
     }
     Ok(())
