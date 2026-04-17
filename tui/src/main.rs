@@ -707,7 +707,6 @@ fn list_gui_apps_linux() -> Result<Vec<(String, String)>> {
 
 #[cfg(target_os = "macos")]
 fn list_gui_apps_macos() -> Result<Vec<(String, String)>> {
-    use std::io::{BufRead, BufReader};
 
     let search_dirs = [
         std::path::PathBuf::from("/Applications"),

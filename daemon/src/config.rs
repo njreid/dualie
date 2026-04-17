@@ -370,6 +370,7 @@ impl DualieConfig {
     }
 
     /// Returns `true` if `machine_name` has `app_name` in its `skip` list.
+    #[allow(dead_code)]
     pub fn machine_skips(&self, machine_name: &str, app_name: &str) -> bool {
         self.machines.get(machine_name)
             .map(|m| m.skip.iter().any(|s| s == app_name))

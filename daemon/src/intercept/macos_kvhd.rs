@@ -30,7 +30,7 @@
 
 use std::ffi::c_void;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 // ── IOKit types ───────────────────────────────────────────────────────────────
 

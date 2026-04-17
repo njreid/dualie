@@ -50,7 +50,6 @@ pub fn new_active_output() -> ActiveOutput {
 /// event (macOS) so that output switches and config hot-reloads take effect
 /// immediately without any extra bookkeeping.
 pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::CompiledOutputConfig {
-    use crate::config::MachineConfig;
     let output_idx = active_output.load(Ordering::Relaxed);
     // Resolve active port → machine config; fall back to an empty config if
     // no machine is assigned to this port.

@@ -11,6 +11,7 @@
 /// Translate an evdev `KEY_*` code to a USB HID keycode (Usage Page 0x07).
 /// Returns 0 if the key has no HID equivalent or is a modifier key
 /// (modifiers are handled via `evdev_modifier_bit`).
+#[allow(dead_code)]
 pub fn evdev_to_hid(evdev: u16) -> u8 {
     // Modifier keys return 0 here — use evdev_modifier_bit() instead.
     match evdev {
@@ -138,6 +139,7 @@ pub fn evdev_to_hid(evdev: u16) -> u8 {
 
 /// Translate a USB HID keycode back to an evdev `KEY_*` code.
 /// Returns 0 if not found.
+#[allow(dead_code)]
 pub fn hid_to_evdev(hid: u8) -> u16 {
     match hid {
         0x04 => 30, 0x05 => 48, 0x06 => 46, 0x07 => 32, 0x08 => 18,
@@ -184,6 +186,7 @@ pub fn hid_to_evdev(hid: u8) -> u16 {
 /// Bit layout (matches USB HID boot-protocol modifier byte):
 ///   0x01 lctrl  0x02 lshift  0x04 lalt  0x08 lmeta
 ///   0x10 rctrl  0x20 rshift  0x40 ralt  0x80 rmeta
+#[allow(dead_code)]
 pub fn evdev_modifier_bit(evdev: u16) -> u8 {
     match evdev {
         29  => 0x01, // KEY_LEFTCTRL

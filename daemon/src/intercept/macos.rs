@@ -54,8 +54,6 @@ use super::remap::{CompiledOutputConfig, LayerState, process_key, VALUE_DOWN, VA
 // ── Raw FFI declarations ───────────────────────────────────────────────────────
 
 type IOReturn          = i32;
-type io_object_t       = u32;
-type mach_port_t       = u32;
 type IOHIDManagerRef   = *mut c_void;
 type IOHIDDeviceRef    = *mut c_void;
 type IOHIDValueRef     = *mut c_void;
@@ -64,7 +62,6 @@ type CFRunLoopRef      = *mut c_void;
 type CFStringRef       = *const c_void;
 type CFAllocatorRef    = *mut c_void;
 type CFDictionaryRef   = *mut c_void;
-type CFSetRef          = *mut c_void;
 
 const kIOReturnSuccess: IOReturn = 0;
 
