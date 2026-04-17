@@ -211,6 +211,68 @@ impl Default for MachineConfig {
     }
 }
 
+impl MachineConfig {
+    /// Return a new config that is `defaults` overlaid with `self` at the leaf level.
+    ///
+    /// Merge rules:
+    /// - `key_remaps`: default entries kept unless `self` defines the same `src_keycode`.
+    /// - `modifier_remaps`: default entries kept unless `self` defines the same `src`.
+    /// - `caps_layer.entries`: default entries kept unless `self` defines the same `src_keycode`.
+    /// - `caps_layer.unmapped_passthrough`: `self` wins if it has any entries, else inherit default.
+    /// - `virtual_actions`: default `Unset` slots filled by `self`; named actions in `self`
+    ///   replace same-named actions from defaults.
+    /// - `skip`: always taken from `self` only (`machine *` cannot set skip).
+    pub fn merge_with_default(&self, defaults: &MachineConfig) -> MachineConfig {
+        // key_remaps: self overrides by src_keycode
+        let mut key_remaps: Vec<KeyRemap> = defaults.key_remaps.iter()
+            .filter(|d| !self.key_remaps.iter().any(|s| s.src_keycode == d.src_keycode))
+            .cloned()
+            .collect();
+        key_remaps.extend(self.key_remaps.iter().cloned());
+
+        // modifier_remaps: self overrides by src
+        let mut modifier_remaps: Vec<ModifierRemap> = defaults.modifier_remaps.iter()
+            .filter(|d| !self.modifier_remaps.iter().any(|s| s.src == d.src))
+            .cloned()
+            .collect();
+        modifier_remaps.extend(self.modifier_remaps.iter().cloned());
+
+        // caps_layer entries: self overrides by src_keycode
+        let mut caps_entries: Vec<CapsLayerEntry> = defaults.caps_layer.entries.iter()
+            .filter(|d| !self.caps_layer.entries.iter().any(|s| s.src_keycode == d.src_keycode))
+            .cloned()
+            .collect();
+        caps_entries.extend(self.caps_layer.entries.iter().cloned());
+
+        // unmapped_passthrough: self wins if it has a caps block of its own, else inherit default
+        let unmapped_passthrough = if !self.caps_layer.entries.is_empty() {
+            self.caps_layer.unmapped_passthrough
+        } else {
+            defaults.caps_layer.unmapped_passthrough
+        };
+
+        // virtual_actions: merge by label; self wins on name collision, fills Unset slots
+        let mut actions = defaults.virtual_actions.clone();
+        for self_action in &self.virtual_actions {
+            let Some(self_label) = self_action.label() else { continue };
+            // Replace same-named action from defaults, or find the first Unset slot
+            if let Some(pos) = actions.iter().position(|a| a.label() == Some(self_label)) {
+                actions[pos] = self_action.clone();
+            } else if let Some(pos) = actions.iter().position(|a| matches!(a, VirtualAction::Unset)) {
+                actions[pos] = self_action.clone();
+            }
+        }
+
+        MachineConfig {
+            virtual_actions: actions,
+            key_remaps,
+            modifier_remaps,
+            caps_layer: CapsLayer { unmapped_passthrough, entries: caps_entries },
+            skip: self.skip.clone(),
+        }
+    }
+}
+
 /// Backwards-compat type alias so existing internal call sites still compile
 /// while we migrate.
 #[allow(dead_code)]
@@ -274,6 +336,10 @@ pub struct DualieConfig {
     /// Per-machine configs, keyed by machine name.
     #[serde(default)]
     pub machines: HashMap<String, MachineConfig>,
+    /// Default mappings applied to all machines (`machine * { }`).
+    /// Individual machine nodes override these at the leaf level.
+    #[serde(default)]
+    pub default_machine: MachineConfig,
     #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
@@ -283,22 +349,24 @@ pub struct DualieConfig {
 impl Default for DualieConfig {
     fn default() -> Self {
         Self {
-            ports:    [None, None],
-            machines: HashMap::new(),
-            sync:     SyncConfig::default(),
-            git_sync: GitSyncConfig::default(),
+            ports:           [None, None],
+            machines:        HashMap::new(),
+            default_machine: MachineConfig::default(),
+            sync:            SyncConfig::default(),
+            git_sync:        GitSyncConfig::default(),
         }
     }
 }
 
 impl DualieConfig {
-    /// Resolve port index (0=A, 1=B) to the machine config for that port.
+    /// Resolve port index (0=A, 1=B) to a merged machine config for that port.
+    /// The named machine's settings override `default_machine` at the leaf level.
     /// Returns `None` if the port has no machine assigned or the machine name
     /// isn't found in `machines`.
-    pub fn resolve_port(&self, port_idx: usize) -> Option<&MachineConfig> {
-        self.ports.get(port_idx)
-            .and_then(|opt| opt.as_deref())
-            .and_then(|name| self.machines.get(name))
+    pub fn resolve_port(&self, port_idx: usize) -> Option<MachineConfig> {
+        let name = self.ports.get(port_idx)?.as_deref()?;
+        let machine = self.machines.get(name)?;
+        Some(machine.merge_with_default(&self.default_machine))
     }
 
     /// Returns `true` if `machine_name` has `app_name` in its `skip` list.
@@ -417,11 +485,20 @@ impl DualieConfig {
                     let name = kdl_arg_str(node, 0)
                         .ok_or_else(|| anyhow::anyhow!("machine requires a name argument"))?
                         .to_owned();
-                    let mut mc = MachineConfig::default();
-                    if let Some(children) = node.children() {
-                        parse_machine(children, &mut mc)?;
+                    if name == "*" {
+                        if let Some(children) = node.children() {
+                            parse_machine(children, &mut cfg.default_machine)?;
+                            if !cfg.default_machine.skip.is_empty() {
+                                bail!("machine *: skip is not valid in the default machine block");
+                            }
+                        }
+                    } else {
+                        let mut mc = MachineConfig::default();
+                        if let Some(children) = node.children() {
+                            parse_machine(children, &mut mc)?;
+                        }
+                        cfg.machines.insert(name, mc);
                     }
-                    cfg.machines.insert(name, mc);
                 }
                 "sync" => {
                     if let Some(children) = node.children() {
@@ -1561,6 +1638,210 @@ local {
         // Missing closing brace
         let src = "machine desk {\n    remap {\n        key esc backspace\n";
         assert!(DualieConfig::from_kdl(src).is_err());
+    }
+
+    // ── machine * default merging ─────────────────────────────────────────────
+
+    #[test]
+    fn default_machine_key_remap_inherited() {
+        // capslock = 0x39, esc = 0x29
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { key capslock esc }
+}
+machine desk {}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.key_remaps.len(), 1);
+        assert_eq!(mc.key_remaps[0].src_keycode, 0x39); // capslock
+        assert_eq!(mc.key_remaps[0].dst_keycode, 0x29); // esc
+    }
+
+    #[test]
+    fn machine_key_remap_overrides_default() {
+        // capslock=0x39, esc=0x29, tab=0x2B
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { key capslock esc }
+}
+machine desk {
+    remap { key capslock tab }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.key_remaps.len(), 1, "only one remap for capslock");
+        let remap = mc.key_remaps.iter().find(|r| r.src_keycode == 0x39).expect("remap");
+        assert_eq!(remap.dst_keycode, 0x2B, "desk tab should override default esc");
+    }
+
+    #[test]
+    fn default_and_machine_key_remaps_additive() {
+        // capslock=0x39, esc=0x29, a=0x04, b=0x05
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { key capslock esc }
+}
+machine desk {
+    remap { key a b }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.key_remaps.len(), 2, "both remaps should be present");
+    }
+
+    #[test]
+    fn default_machine_caps_chord_inherited() {
+        // h=0x0B, left=0x50
+        let src = r#"
+ports { a desk }
+machine * {
+    layers {
+        caps { chord h left }
+    }
+}
+machine desk {}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.caps_layer.entries.len(), 1);
+        assert_eq!(mc.caps_layer.entries[0].src_keycode, 0x0B); // h
+    }
+
+    #[test]
+    fn machine_caps_chord_overrides_default() {
+        // h=0x0B, j=0x0D, left=0x50, right=0x4F, down=0x51
+        let src = r#"
+ports { a desk }
+machine * {
+    layers {
+        caps {
+            chord h left
+            chord j down
+        }
+    }
+}
+machine desk {
+    layers {
+        caps { chord h right }
+    }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.caps_layer.entries.len(), 2, "h overridden + j inherited");
+        let h_entry = mc.caps_layer.entries.iter().find(|e| e.src_keycode == 0x0B).expect("h");
+        assert_eq!(h_entry.dst_keycodes[0], 0x4F, "h should map to right");
+        assert!(mc.caps_layer.entries.iter().any(|e| e.src_keycode == 0x0D), "j inherited");
+    }
+
+    #[test]
+    fn default_machine_modifier_remap_inherited() {
+        // lalt=0x04 bit, lctrl=0x01 bit
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { modifier lalt lctrl }
+}
+machine desk {}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.modifier_remaps.len(), 1);
+        assert_eq!(mc.modifier_remaps[0].src, 0x04); // lalt
+        assert_eq!(mc.modifier_remaps[0].dst, 0x01); // lctrl
+    }
+
+    #[test]
+    fn machine_modifier_remap_overrides_default() {
+        // lalt=0x04, lctrl=0x01, rctrl=0x10
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { modifier lalt lctrl }
+}
+machine desk {
+    remap { modifier lalt rctrl }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.modifier_remaps.len(), 1, "only one remap for lalt");
+        let mr = mc.modifier_remaps.iter().find(|r| r.src == 0x04).expect("modifier remap");
+        assert_eq!(mr.dst, 0x10, "desk rctrl should override default lctrl");
+    }
+
+    #[test]
+    fn default_machine_skip_is_error() {
+        let src = r#"
+machine * {
+    skip { app "fish" }
+}
+machine desk {}
+"#;
+        assert!(DualieConfig::from_kdl(src).is_err(), "skip in machine * should be an error");
+    }
+
+    #[test]
+    fn no_default_machine_still_works() {
+        let src = r#"
+ports { a desk }
+machine desk {
+    remap { key capslock esc }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.key_remaps.len(), 1);
+    }
+
+    #[test]
+    fn default_machine_caps_action_inherited() {
+        // virtual action entry (action s "Slack") inherited from * into desk
+        let src = r#"
+ports { a desk }
+machine * {
+    actions {
+        launch "Slack" app-id="com.tinyspeck.slackmacgap"
+    }
+    layers {
+        caps {
+            action s "Slack"
+        }
+    }
+}
+machine desk {}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.caps_layer.entries.len(), 1);
+        assert_eq!(mc.caps_layer.entries[0].entry_type, CAPS_ENTRY_VIRTUAL);
+        // action slot 0 should be the Slack action inherited from *
+        assert_eq!(mc.virtual_actions[0], VirtualAction::AppLaunch {
+            app_id: "com.tinyspeck.slackmacgap".into(),
+            label:  "Slack".into(),
+        });
+    }
+
+    #[test]
+    fn machine_skip_not_affected_by_default() {
+        let src = r#"
+ports { a desk }
+machine * {
+    remap { key capslock esc }
+}
+machine desk {
+    skip { app "fish" }
+}
+"#;
+        let cfg = DualieConfig::from_kdl(src).expect("parse");
+        let mc = cfg.resolve_port(0).expect("port 0");
+        assert_eq!(mc.skip, vec!["fish".to_owned()]);
     }
 
 }

@@ -54,10 +54,8 @@ pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::Com
     let output_idx = active_output.load(Ordering::Relaxed);
     // Resolve active port → machine config; fall back to an empty config if
     // no machine is assigned to this port.
-    static EMPTY: std::sync::OnceLock<MachineConfig> = std::sync::OnceLock::new();
-    let empty = EMPTY.get_or_init(MachineConfig::default);
-    let machine = cfg.resolve_port(output_idx as usize).unwrap_or(empty);
-    remap::CompiledOutputConfig::from_config(machine, output_idx, 2)
+    let machine = cfg.resolve_port(output_idx as usize).unwrap_or_default();
+    remap::CompiledOutputConfig::from_config(&machine, output_idx, 2)
 }
 
 /// Dispatch the side-effects of a `ProcessResult` — output switch, clipboard
