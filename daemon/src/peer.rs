@@ -213,7 +213,28 @@ async fn wait_for_device(path: &str) {
         return;
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        info!("waiting for {path} to appear…");
+        let path_owned = path.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            wait_kqueue_dev(&path_owned)
+        }).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("kqueue wait failed ({e:#}), retrying in 5s");
+                sleep(Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                warn!("kqueue task panicked ({e}), retrying in 5s");
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+        return;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         info!("device absent — retrying in 5s");
         sleep(Duration::from_secs(5)).await;
@@ -265,6 +286,82 @@ fn wait_udev_tty(path: &str) -> Result<()> {
             }
         }
     }
+}
+
+/// Blocking: watch the parent directory of `path` with kqueue for changes,
+/// returning once `path` exists on the filesystem.
+///
+/// Uses `EVFILT_VNODE` / `NOTE_WRITE` on the `/dev` directory — fires whenever
+/// entries are added or removed, with zero CPU while waiting.
+#[cfg(target_os = "macos")]
+fn wait_kqueue_dev(path: &str) -> Result<()> {
+    use libc;
+    use std::os::unix::io::RawFd;
+
+    let dev_path = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/dev"));
+
+    let dir_cstr = std::ffi::CString::new(dev_path.to_str().unwrap_or("/dev"))?;
+    let dir_fd: RawFd = unsafe { libc::open(dir_cstr.as_ptr(), libc::O_RDONLY) };
+    if dir_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let kq: RawFd = unsafe { libc::kqueue() };
+    if kq < 0 {
+        unsafe { libc::close(dir_fd); }
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    // Register NOTE_WRITE on the directory — fires when entries are added/removed.
+    let changelist = libc::kevent {
+        ident:  dir_fd as libc::uintptr_t,
+        filter: libc::EVFILT_VNODE,
+        flags:  libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
+        fflags: libc::NOTE_WRITE,
+        data:   0,
+        udata:  std::ptr::null_mut(),
+    };
+    let ret = unsafe {
+        libc::kevent(kq, &changelist, 1, std::ptr::null_mut(), 0, std::ptr::null())
+    };
+    if ret < 0 {
+        unsafe { libc::close(dir_fd); libc::close(kq); }
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    // Re-check after arming to close the TOCTOU window.
+    if std::path::Path::new(path).exists() {
+        unsafe { libc::close(dir_fd); libc::close(kq); }
+        return Ok(());
+    }
+
+    let result = loop {
+        let mut event = libc::kevent {
+            ident: 0, filter: 0, flags: 0, fflags: 0, data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let ret = unsafe {
+            libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
+        };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue; // EINTR
+            }
+            break Err(err.into());
+        }
+        if std::path::Path::new(path).exists() {
+            info!("{path} appeared");
+            // Brief settle: give the serial driver time to finish enumeration.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            break Ok(());
+        }
+    };
+
+    unsafe { libc::close(dir_fd); libc::close(kq); }
+    result
 }
 
 // ── Background reconnect loop ─────────────────────────────────────────────────

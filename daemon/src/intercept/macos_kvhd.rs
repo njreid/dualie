@@ -7,11 +7,14 @@
 ///
 /// # Karabiner-DriverKit-VirtualHIDDevice
 ///
-/// Service class name (DriverKit, Karabiner-Elements ≥ 14):
-///   `org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard`
+/// DriverKit (Karabiner-Elements ≥ 14):
+///   The IOKit node name is `org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot`
+///   (IOClass = IOUserService, IOUserClass = org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot).
+///   Match with IOServiceNameMatching, not IOServiceMatching (which matches IOClass).
 ///
-/// Legacy kext name (Karabiner-Elements ≤ 13):
-///   `org_pqrs_driver_Karabiner_VirtualHIDDevice_VirtualHIDKeyboard`
+/// Legacy kext (Karabiner-Elements ≤ 13):
+///   IOClass = `org_pqrs_driver_Karabiner_VirtualHIDDevice_VirtualHIDKeyboard`
+///   Match with IOServiceMatching.
 ///
 /// User client IOKit selector (from karabiner-driverkit/src/Extension/.../UserClient):
 ///   0 = `postReport` — accepts an 8-byte keyboard input report buffer
@@ -42,10 +45,13 @@ type mach_port_t  = u32;
 
 const kIOReturnSuccess: IOReturn = 0;
 
-// ── IOKit service class names (try DriverKit first, fall back to kext) ────────
+// ── IOKit service names ───────────────────────────────────────────────────────
 
-const KVHD_DRIVERKIT_SERVICE: &[u8] =
-    b"org_pqrs_Karabiner_DriverKit_VirtualHIDKeyboard\0";
+// DriverKit (≥ 14): matched by node name via IOServiceNameMatching.
+const KVHD_DRIVERKIT_NODE: &[u8] =
+    b"org_pqrs_Karabiner_DriverKit_VirtualHIDDeviceRoot\0";
+
+// Legacy kext (≤ 13): matched by IOClass via IOServiceMatching.
 const KVHD_KEXT_SERVICE: &[u8] =
     b"org_pqrs_driver_Karabiner_VirtualHIDDevice_VirtualHIDKeyboard\0";
 
@@ -61,7 +67,8 @@ extern "C" {
         matching: *mut c_void,  // CFDictionaryRef consumed
     ) -> io_service_t;
 
-    fn IOServiceMatching(name: *const u8) -> *mut c_void; // returns CFMutableDictionaryRef
+    fn IOServiceMatching(name: *const u8) -> *mut c_void;     // match by IOClass
+    fn IOServiceNameMatching(name: *const u8) -> *mut c_void; // match by node name
 
     fn IOServiceOpen(
         service:      io_service_t,
@@ -97,10 +104,16 @@ pub struct KvhdHandle {
 
 impl KvhdHandle {
     /// Open a connection to the Karabiner VirtualHIDKeyboard service.
-    /// Tries the DriverKit service name first, then the legacy kext name.
+    /// Tries the DriverKit node (≥ 14) first via IOServiceNameMatching,
+    /// then the legacy kext class via IOServiceMatching.
     pub fn open() -> Result<Self> {
-        for name in [KVHD_DRIVERKIT_SERVICE, KVHD_KEXT_SERVICE] {
-            let matching = unsafe { IOServiceMatching(name.as_ptr()) };
+        // (matching_fn, name)
+        let candidates: &[(unsafe extern "C" fn(*const u8) -> *mut c_void, &[u8])] = &[
+            (IOServiceNameMatching, KVHD_DRIVERKIT_NODE),
+            (IOServiceMatching,     KVHD_KEXT_SERVICE),
+        ];
+        for &(matching_fn, name) in candidates {
+            let matching = unsafe { matching_fn(name.as_ptr()) };
             if matching.is_null() {
                 continue;
             }
