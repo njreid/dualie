@@ -119,8 +119,9 @@ impl KvhdHandle {
             return Ok(Self { connect });
         }
         bail!(
-            "Karabiner VirtualHIDKeyboard service not found — \
-             is Karabiner-Elements installed and running?"
+            "Karabiner VirtualHIDKeyboard driver not found — \
+             install Karabiner-Elements (the driver kext loads at boot; \
+             the Karabiner-Elements app does not need to be running)"
         );
     }
 
