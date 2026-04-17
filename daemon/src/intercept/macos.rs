@@ -167,9 +167,10 @@ extern "C" {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    // Returns true if the current process has Accessibility permission.
-    // When options contains kAXTrustedCheckOptionPrompt=true, macOS adds the
-    // app to System Settings → Accessibility and shows the authorisation prompt.
+    // Check without prompting.
+    fn AXIsProcessTrusted() -> bool;
+    // Check and, when options contains kAXTrustedCheckOptionPrompt=true, add
+    // the app to System Settings → Accessibility and show the auth dialog.
     fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
 }
 
@@ -271,13 +272,20 @@ unsafe extern "C" fn value_available(
 
 // ── Accessibility permission ──────────────────────────────────────────────────
 
-/// Check for Accessibility permission and prompt via the system dialog if not
-/// yet granted.  The prompt surfaces Dualie in System Settings → Accessibility
-/// so the user doesn't have to find the binary manually.
+/// Check for Accessibility permission; prompt via the system dialog only if
+/// not yet granted.  The prompt surfaces Dualie in System Settings →
+/// Accessibility so the user doesn't have to find the binary manually.
 fn request_accessibility_if_needed() {
-    // Build { kAXTrustedCheckOptionPrompt: kCFBooleanTrue }
+    // Fast path: already trusted — don't disturb the user.
+    if unsafe { AXIsProcessTrusted() } {
+        info!("macOS: Accessibility permission already granted");
+        return;
+    }
+
+    // Not trusted yet — prompt.  This registers Dualie in System Settings and
+    // shows the authorisation dialog.
     const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-    let trusted = unsafe {
+    let granted = unsafe {
         let key = CFStringCreateWithCString(
             kCFAllocatorDefault,
             b"AXTrustedCheckOptionPrompt\0".as_ptr(),
@@ -294,7 +302,7 @@ fn request_accessibility_if_needed() {
         CFRelease(opts as *mut c_void);
         result
     };
-    if trusted {
+    if granted {
         info!("macOS: Accessibility permission granted");
     } else {
         warn!("macOS: Accessibility permission not yet granted — approve in System Settings → Privacy & Security → Accessibility");
