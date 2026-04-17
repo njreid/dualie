@@ -90,9 +90,10 @@ extern "C" {
     ) -> IOReturn;
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
+// mach_task_self_ is a global variable (mach_port_t), not a function.
+// The C macro mach_task_self() reads it; we do the same here.
 extern "C" {
-    fn mach_task_self_() -> mach_port_t;
+    static mach_task_self_: mach_port_t;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -123,7 +124,7 @@ impl KvhdHandle {
             }
             let mut connect: io_connect_t = 0;
             let ret = unsafe {
-                IOServiceOpen(service, mach_task_self_(), 0, &mut connect)
+                IOServiceOpen(service, mach_task_self_, 0, &mut connect)
             };
             unsafe { IOObjectRelease(service); }
             if ret != kIOReturnSuccess {
