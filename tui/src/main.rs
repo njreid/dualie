@@ -11,8 +11,8 @@
 ///   1  Status      — live daemon status polled from the Unix socket
 ///   2  Remaps      — key and modifier remaps for the selected output
 ///   3  Caps layer  — caps-layer binding table for the selected output
-///   4  Config      — raw KDL config with reload / open-in-$EDITOR
-///   5  Sync        — per-app config-file sync registry; toggle apps on/off
+///   4  Sync        — per-app config-file sync registry; toggle apps on/off
+///   5  Actions     — virtual key bindings
 
 mod app_registry;
 mod ipc;
@@ -78,20 +78,18 @@ pub enum Tab {
     Status,
     Remaps,
     Layers,
-    Config,
     Sync,
     Actions,
 }
 
 impl Tab {
-    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Config, Tab::Sync, Tab::Actions];
+    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Sync, Tab::Actions];
 
     fn title(self) -> &'static str {
         match self {
             Tab::Status    => "Status",
             Tab::Remaps    => "Remaps",
-            Tab::Layers => "Layers",
-            Tab::Config    => "Config",
+            Tab::Layers    => "Layers",
             Tab::Sync      => "Sync",
             Tab::Actions   => "Actions",
         }
@@ -110,6 +108,22 @@ impl Tab {
         let i = (self.index() + Self::ALL.len() - 1) % Self::ALL.len();
         Self::ALL[i]
     }
+}
+
+// ── Layers tab state ──────────────────────────────────────────────────────────
+
+/// The mapping types available when adding a new caps-layer entry.
+pub const LAYER_ENTRY_TYPES: &[&str] = &["chord", "swap", "jump-a", "jump-b", "action", "clip-pull"];
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LayersMode {
+    Browse,
+    /// Step 1: pick mapping type.
+    PickType { type_sel: usize },
+    /// Step 2: type the source key name.
+    TypeSrc { entry_type: String, src: String },
+    /// Step 3: type the target (only for chord and action types).
+    TypeTarget { entry_type: String, src: String, target: String },
 }
 
 // ── Sync tab state ────────────────────────────────────────────────────────────
@@ -295,6 +309,21 @@ fn find_actions_insertion_point(src: &str) -> Option<usize> {
     Some(actions_start + "actions {".len() + close_rel)
 }
 
+/// Find the byte offset just before the closing `}` of the first `caps` block
+/// inside `machine * { layers { ... } }`.
+fn find_caps_insertion_point(src: &str) -> Option<usize> {
+    let machine_pos = src.find("machine *")?;
+    let after_machine = &src[machine_pos..];
+    let layers_rel = after_machine.find("layers {")?;
+    let layers_abs = machine_pos + layers_rel;
+    let after_layers = &src[layers_abs + "layers {".len()..];
+    let caps_rel = after_layers.find("caps {")?;
+    let caps_abs = layers_abs + "layers {".len() + caps_rel;
+    let after_caps = &src[caps_abs + "caps {".len()..];
+    let close_rel = after_caps.find('}')?;
+    Some(caps_abs + "caps {".len() + close_rel)
+}
+
 /// Parse the `sync { app "..." ... }` block from KDL config text.
 /// Returns the set of enabled app names.
 fn parse_sync_apps(src: &str) -> std::collections::HashSet<String> {
@@ -359,6 +388,8 @@ pub struct App {
     pub actions:        ActionsTabState,
     /// Which layer is shown in the Layers tab (0 = Caps).
     pub layers_selected: usize,
+    /// Modal state for the "add new layer mapping" wizard.
+    pub layers_mode: LayersMode,
     /// Queued one-line message shown in the footer (errors, info).
     pub message:      Option<String>,
     pub last_refresh: Instant,
@@ -384,6 +415,7 @@ impl App {
             sync,
             actions,
             layers_selected: 0,
+            layers_mode:  LayersMode::Browse,
             message:      None,
             last_refresh: Instant::now() - Duration::from_secs(10),
             socket_path,
@@ -529,6 +561,33 @@ impl App {
                 self.config_text = new_src;
                 self.actions = ActionsTabState::load(&self.config_text);
                 self.message = Some(format!("Added action \"{label}\"."));
+            }
+            Err(e) => { self.message = Some(format!("Save error: {e}")); }
+        }
+    }
+
+    /// Write a new caps-layer entry to `machine * { layers { caps { } } }`.
+    pub fn save_caps_entry(&mut self, entry_type: &str, src: &str, target: &str) {
+        let new_line = match entry_type {
+            "chord" => format!("            chord {src} {target}\n"),
+            "action" => format!("            action {src} \"{target}\"\n"),
+            other => format!("            {other} {src}\n"),
+        };
+
+        let new_src = if let Some(pos) = find_caps_insertion_point(&self.config_text) {
+            let mut out = self.config_text.clone();
+            out.insert_str(pos, &new_line);
+            out
+        } else {
+            // No machine * caps block — create one.
+            let block = format!("\nmachine * {{\n    layers {{\n        caps {{\n{new_line}        }}\n    }}\n}}\n");
+            format!("{}{block}", self.config_text)
+        };
+
+        match std::fs::write(&self.config_path, &new_src) {
+            Ok(()) => {
+                self.config_text = new_src;
+                self.message = Some(format!("Added {entry_type} {src}."));
             }
             Err(e) => { self.message = Some(format!("Save error: {e}")); }
         }
@@ -923,18 +982,102 @@ async fn run_app<B: ratatui::backend::Backend>(
 
                 // True when a text input field has focus — global hotkeys must not fire.
                 let in_search = app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search;
+                let in_layers_modal = !matches!(app.layers_mode, LayersMode::Browse);
+                let in_modal = in_search || in_layers_modal;
 
                 match (key.modifiers, key.code) {
                     // Ctrl-C always quits, even in search mode.
                     (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                         return Ok(());
                     }
-                    // Quit — not in search mode.
-                    (_, KeyCode::Char('q')) if !in_search => {
+                    // Quit — not in any modal mode.
+                    (_, KeyCode::Char('q')) if !in_modal => {
                         return Ok(());
                     }
 
-                    // ── Actions search mode — all keys consumed here ──────────
+                    // ── Layers modal — PickType ───────────────────────────────
+                    (_, KeyCode::Esc) if in_layers_modal => {
+                        app.layers_mode = LayersMode::Browse;
+                    }
+                    (_, KeyCode::Char('j')) | (_, KeyCode::Down)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { ref mut type_sel } = app.layers_mode {
+                            *type_sel = (*type_sel + 1).min(LAYER_ENTRY_TYPES.len() - 1);
+                        }
+                    }
+                    (_, KeyCode::Char('k')) | (_, KeyCode::Up)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { ref mut type_sel } = app.layers_mode {
+                            *type_sel = type_sel.saturating_sub(1);
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { type_sel } = &app.layers_mode {
+                            let entry_type = LAYER_ENTRY_TYPES[*type_sel].to_owned();
+                            app.layers_mode = LayersMode::TypeSrc { entry_type, src: String::new() };
+                        }
+                    }
+
+                    // ── Layers modal — TypeSrc ────────────────────────────────
+                    (_, KeyCode::Backspace)
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { ref mut src, .. } = app.layers_mode {
+                            src.pop();
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { entry_type, src } = &app.layers_mode {
+                            let entry_type = entry_type.clone();
+                            let src = src.clone();
+                            if entry_type == "chord" || entry_type == "action" {
+                                app.layers_mode = LayersMode::TypeTarget { entry_type, src, target: String::new() };
+                            } else {
+                                app.save_caps_entry(&entry_type, &src, "");
+                                app.layers_mode = LayersMode::Browse;
+                            }
+                        }
+                    }
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { ref mut src, .. } = app.layers_mode {
+                            src.push(c);
+                        }
+                    }
+
+                    // ── Layers modal — TypeTarget ─────────────────────────────
+                    (_, KeyCode::Backspace)
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { ref mut target, .. } = app.layers_mode {
+                            target.pop();
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { entry_type, src, target } = &app.layers_mode {
+                            let (et, s, t) = (entry_type.clone(), src.clone(), target.clone());
+                            app.save_caps_entry(&et, &s, &t);
+                            app.layers_mode = LayersMode::Browse;
+                        }
+                    }
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { ref mut target, .. } = app.layers_mode {
+                            target.push(c);
+                        }
+                    }
+
+                    // ── Actions search mode — all keys consumed here ─────────
                     (_, KeyCode::Esc)
                         if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
                     {
@@ -999,19 +1142,26 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.actions.app_sel = 0;
                     }
 
+                    // ── Layers tab — n to add new entry ──────────────────────
+                    (_, KeyCode::Char('n'))
+                        if app.tab == Tab::Layers && !in_layers_modal =>
+                    {
+                        app.layers_mode = LayersMode::PickType { type_sel: 0 };
+                    }
+
                     // ── Layers tab — h/l switch layers (before global tab nav) ─
-                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers => {
+                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers && !in_layers_modal => {
                         app.layers_selected = (app.layers_selected + 1).min(0);
                         app.scroll = 0;
                     }
-                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers => {
+                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers && !in_layers_modal => {
                         app.layers_selected = app.layers_selected.saturating_sub(1);
                         app.scroll = 0;
                     }
 
-                    // ── Global tab navigation (blocked in search mode) ────────
+                    // ── Global tab navigation (blocked in modal mode) ─────────
                     (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l'))
-                        if !in_search =>
+                        if !in_modal =>
                     {
                         app.tab = app.tab.next();
                         app.scroll = 0;
@@ -1021,17 +1171,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tab = app.tab.prev();
                         app.scroll = 0;
                     }
-                    (_, KeyCode::Char('h')) if !in_search => {
+                    (_, KeyCode::Char('h')) if !in_modal => {
                         app.tab = app.tab.prev();
                         app.scroll = 0;
                     }
-                    // Number keys 1-6 select tab directly (blocked in search mode).
-                    (_, KeyCode::Char('1')) if !in_search => { app.tab = Tab::Status;  app.scroll = 0; }
-                    (_, KeyCode::Char('2')) if !in_search => { app.tab = Tab::Remaps;  app.scroll = 0; }
-                    (_, KeyCode::Char('3')) if !in_search => { app.tab = Tab::Layers;  app.scroll = 0; }
-                    (_, KeyCode::Char('4')) if !in_search => { app.tab = Tab::Config;  app.scroll = 0; }
-                    (_, KeyCode::Char('5')) if !in_search => { app.tab = Tab::Sync;    app.scroll = 0; }
-                    (_, KeyCode::Char('6')) if !in_search => { app.tab = Tab::Actions; app.scroll = 0; }
+                    // Number keys 1-5 select tab directly (blocked in modal mode).
+                    (_, KeyCode::Char('1')) if !in_modal => { app.tab = Tab::Status;  app.scroll = 0; }
+                    (_, KeyCode::Char('2')) if !in_modal => { app.tab = Tab::Remaps;  app.scroll = 0; }
+                    (_, KeyCode::Char('3')) if !in_modal => { app.tab = Tab::Layers;  app.scroll = 0; }
+                    (_, KeyCode::Char('4')) if !in_modal => { app.tab = Tab::Sync;    app.scroll = 0; }
+                    (_, KeyCode::Char('5')) if !in_modal => { app.tab = Tab::Actions; app.scroll = 0; }
 
                     // ── Sync tab ──────────────────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
@@ -1064,29 +1213,26 @@ async fn run_app<B: ratatui::backend::Backend>(
                     (_, KeyCode::PageUp)   => { app.scroll = app.scroll.saturating_sub(10); }
 
                     // Output select (Remaps / Layers tabs)
-                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) if !in_search => {
+                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) if !in_modal => {
                         app.output_idx = 0;
                     }
-                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) if !in_search => {
+                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) if !in_modal => {
                         app.output_idx = 1;
                     }
                     // Status tab: manual refresh
                     (_, KeyCode::Char('r')) if app.tab == Tab::Status => {
                         app.refresh_status();
                     }
-                    // Config tab actions
-                    (_, KeyCode::Char('r')) if app.tab == Tab::Config => {
-                        app.reload_config();
-                    }
-                    (_, KeyCode::Char('e')) if app.tab == Tab::Config => {
+                    // Global: open config in $EDITOR
+                    (_, KeyCode::Char('e')) if !in_modal => {
                         app.open_in_editor();
                         terminal.clear()?;
                     }
-                    // Git actions (not in search mode)
-                    (_, KeyCode::Char('p')) if !in_search => {
+                    // Git actions (not in modal mode)
+                    (_, KeyCode::Char('p')) if !in_modal => {
                         app.git_pull();
                     }
-                    (_, KeyCode::Char('u')) if !in_search => {
+                    (_, KeyCode::Char('u')) if !in_modal => {
                         app.git_push();
                     }
                     _ => {}
