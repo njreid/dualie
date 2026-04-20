@@ -77,21 +77,23 @@ enum Cmd {
 pub enum Tab {
     Status,
     Remaps,
-    CapsLayer,
+    Layers,
     Config,
     Sync,
+    Actions,
 }
 
 impl Tab {
-    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::CapsLayer, Tab::Config, Tab::Sync];
+    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Config, Tab::Sync, Tab::Actions];
 
     fn title(self) -> &'static str {
         match self {
             Tab::Status    => "Status",
             Tab::Remaps    => "Remaps",
-            Tab::CapsLayer => "Caps Layer",
+            Tab::Layers => "Layers",
             Tab::Config    => "Config",
             Tab::Sync      => "Sync",
+            Tab::Actions   => "Actions",
         }
     }
 
@@ -151,6 +153,146 @@ impl SyncTabState {
     fn move_down(&mut self) {
         if self.selected + 1 < self.rows.len() { self.selected += 1; }
     }
+}
+
+// ── Actions tab state ─────────────────────────────────────────────────────────
+
+/// One configured action as shown in the Actions tab list.
+#[derive(Debug, Clone)]
+pub struct ActionRow {
+    pub label:    String,
+    pub kind:     String,  // "launch" or "shell"
+    pub app_id:   String,  // bundle ID or command
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ActionsMode {
+    /// Browsing the existing actions list.
+    Browse,
+    /// App-picker: searching installed apps to add a new action.
+    Search,
+}
+
+pub struct ActionsTabState {
+    /// Existing actions parsed from the KDL config.
+    pub rows:     Vec<ActionRow>,
+    pub selected: usize,
+    pub mode:     ActionsMode,
+    /// Search query typed by the user.
+    pub query:    String,
+    /// All installed apps (loaded lazily on first Search entry).
+    pub all_apps: Option<Vec<(String, String)>>,  // (app_id, display_name)
+    /// Index into the filtered results list.
+    pub app_sel:  usize,
+}
+
+impl ActionsTabState {
+    pub fn load(config_text: &str) -> Self {
+        Self {
+            rows:     parse_actions_from_kdl(config_text),
+            selected: 0,
+            mode:     ActionsMode::Browse,
+            query:    String::new(),
+            all_apps: None,
+            app_sel:  0,
+        }
+    }
+
+    /// Filtered apps matching the current query.
+    pub fn filtered_apps(&self) -> Vec<&(String, String)> {
+        let apps = match &self.all_apps {
+            Some(a) => a,
+            None => return vec![],
+        };
+        if self.query.is_empty() {
+            return apps.iter().collect();
+        }
+        let q = self.query.to_ascii_lowercase();
+        apps.iter()
+            .filter(|(id, name)| {
+                name.to_ascii_lowercase().contains(&q) || id.to_ascii_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    pub fn move_up(&mut self) {
+        match self.mode {
+            ActionsMode::Browse => { if self.selected > 0 { self.selected -= 1; } }
+            ActionsMode::Search => { if self.app_sel > 0 { self.app_sel -= 1; } }
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        match self.mode {
+            ActionsMode::Browse => {
+                if self.selected + 1 < self.rows.len() { self.selected += 1; }
+            }
+            ActionsMode::Search => {
+                let count = self.filtered_apps().len();
+                if self.app_sel + 1 < count { self.app_sel += 1; }
+            }
+        }
+    }
+}
+
+/// Parse all `launch`/`shell` actions from any machine block in the KDL source.
+fn parse_actions_from_kdl(src: &str) -> Vec<ActionRow> {
+    let mut rows = Vec::new();
+    let Ok(doc) = src.parse::<kdl::KdlDocument>() else { return rows };
+    for node in doc.nodes() {
+        if node.name().value() != "machine" { continue; }
+        let Some(children) = node.children() else { continue };
+        for child in children.nodes() {
+            if child.name().value() != "actions" { continue; }
+            let Some(ac) = child.children() else { continue };
+            for action in ac.nodes() {
+                let kind = action.name().value();
+                if kind != "launch" && kind != "shell" { continue; }
+                let label = action.entries().iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_string())
+                    .unwrap_or("?")
+                    .to_owned();
+                let app_id = action.entries().iter()
+                    .find(|e| e.name().is_some_and(|n| n.value() == "app-id" || n.value() == "command"))
+                    .and_then(|e| e.value().as_string())
+                    .unwrap_or("")
+                    .to_owned();
+                rows.push(ActionRow { label, kind: kind.to_owned(), app_id });
+            }
+        }
+    }
+    rows
+}
+
+/// Append a `launch` action to the `machine *` actions block (creating it if absent).
+pub fn write_launch_action(src: &str, label: &str, app_id: &str) -> String {
+    let new_line = format!("        launch {label:?} app-id={app_id:?}\n");
+
+    // Try to insert into existing `machine * { actions { ... } }`.
+    if let Some(pos) = find_actions_insertion_point(src) {
+        let mut out = src.to_owned();
+        out.insert_str(pos, &new_line);
+        return out;
+    }
+
+    // No machine * actions block — create one at the end.
+    let block = format!("\nmachine * {{\n    actions {{\n{new_line}    }}\n}}\n");
+    format!("{src}{block}")
+}
+
+/// Find the byte offset just before the closing `}` of the first `actions` block
+/// inside a `machine *` or `machine` node.
+fn find_actions_insertion_point(src: &str) -> Option<usize> {
+    // Locate `machine *` or any machine node containing `actions {`.
+    let machine_pos = src.find("machine *")?;
+    let after_machine = &src[machine_pos..];
+    let actions_rel = after_machine.find("actions {")?;
+    let actions_start = machine_pos + actions_rel;
+    // Find the matching closing `}` for the actions block.
+    let after_actions = &src[actions_start + "actions {".len()..];
+    let close_rel = after_actions.find('}')?;
+    Some(actions_start + "actions {".len() + close_rel)
 }
 
 /// Parse the `sync { app "..." ... }` block from KDL config text.
@@ -213,7 +355,10 @@ pub struct App {
     pub config_path:  std::path::PathBuf,
     pub scroll:       u16,
     pub output_idx:   usize,  // 0 = A, 1 = B
-    pub sync:         SyncTabState,
+    pub sync:           SyncTabState,
+    pub actions:        ActionsTabState,
+    /// Which layer is shown in the Layers tab (0 = Caps).
+    pub layers_selected: usize,
     /// Queued one-line message shown in the footer (errors, info).
     pub message:      Option<String>,
     pub last_refresh: Instant,
@@ -226,7 +371,8 @@ impl App {
     fn new(socket_path: String) -> Self {
         let config_path = kdl_config_path();
         let config_text = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let sync = SyncTabState::load(&config_text);
+        let sync    = SyncTabState::load(&config_text);
+        let actions = ActionsTabState::load(&config_text);
         Self {
             tab:          Tab::Status,
             status:       None,
@@ -236,6 +382,8 @@ impl App {
             scroll:       0,
             output_idx:   0,
             sync,
+            actions,
+            layers_selected: 0,
             message:      None,
             last_refresh: Instant::now() - Duration::from_secs(10),
             socket_path,
@@ -259,7 +407,8 @@ impl App {
         match std::fs::read_to_string(&self.config_path) {
             Ok(text) => {
                 self.config_text = text;
-                self.sync = SyncTabState::load(&self.config_text);
+                self.sync    = SyncTabState::load(&self.config_text);
+                self.actions = ActionsTabState::load(&self.config_text);
                 self.message = Some("Config reloaded.".into());
             }
             Err(e) => {
@@ -370,6 +519,18 @@ impl App {
                 self.message = Some(format!("Push failed: {first}"));
             }
             Err(e) => self.message = Some(format!("git: {e}")),
+        }
+    }
+
+    fn save_action(&mut self, label: String, app_id: String) {
+        let new_src = write_launch_action(&self.config_text, &label, &app_id);
+        match std::fs::write(&self.config_path, &new_src) {
+            Ok(()) => {
+                self.config_text = new_src;
+                self.actions = ActionsTabState::load(&self.config_text);
+                self.message = Some(format!("Added action \"{label}\"."));
+            }
+            Err(e) => { self.message = Some(format!("Save error: {e}")); }
         }
     }
 
@@ -778,6 +939,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                         return Ok(());
                     }
+                    // Layers tab — h/l switch between layers
+                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers => {
+                        app.layers_selected = (app.layers_selected + 1).min(0); // clamp to known layers
+                        app.scroll = 0;
+                    }
+                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers => {
+                        app.layers_selected = app.layers_selected.saturating_sub(1);
+                        app.scroll = 0;
+                    }
                     // Tab navigation
                     (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l')) => {
                         app.tab = app.tab.next();
@@ -789,12 +959,68 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tab = app.tab.prev();
                         app.scroll = 0;
                     }
-                    // Number keys 1-5 select tab directly
+                    // Number keys 1-6 select tab directly
                     (_, KeyCode::Char('1')) => { app.tab = Tab::Status;    app.scroll = 0; }
                     (_, KeyCode::Char('2')) => { app.tab = Tab::Remaps;    app.scroll = 0; }
-                    (_, KeyCode::Char('3')) => { app.tab = Tab::CapsLayer; app.scroll = 0; }
+                    (_, KeyCode::Char('3')) => { app.tab = Tab::Layers; app.scroll = 0; }
                     (_, KeyCode::Char('4')) => { app.tab = Tab::Config;    app.scroll = 0; }
                     (_, KeyCode::Char('5')) => { app.tab = Tab::Sync;      app.scroll = 0; }
+                    (_, KeyCode::Char('6')) => { app.tab = Tab::Actions;   app.scroll = 0; }
+
+                    // Actions tab — Search mode: type to filter, j/k navigate, Enter confirm, Esc cancel
+                    (_, KeyCode::Esc)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.mode = ActionsMode::Browse;
+                        app.actions.query.clear();
+                        app.actions.app_sel = 0;
+                    }
+                    (_, KeyCode::Enter)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        let filtered = app.actions.filtered_apps();
+                        if let Some((app_id, name)) = filtered.get(app.actions.app_sel) {
+                            let label = name.clone();
+                            let app_id = app_id.clone();
+                            app.actions.mode = ActionsMode::Browse;
+                            app.actions.query.clear();
+                            app.actions.app_sel = 0;
+                            app.save_action(label, app_id);
+                        }
+                    }
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if app.tab == Tab::Actions =>
+                    {
+                        app.actions.move_down();
+                    }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if app.tab == Tab::Actions =>
+                    {
+                        app.actions.move_up();
+                    }
+                    (_, KeyCode::Char('n'))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Browse =>
+                    {
+                        // Lazy-load installed apps on first open.
+                        if app.actions.all_apps.is_none() {
+                            app.actions.all_apps = Some(list_gui_apps().unwrap_or_default());
+                        }
+                        app.actions.mode = ActionsMode::Search;
+                        app.actions.query.clear();
+                        app.actions.app_sel = 0;
+                    }
+                    (_, KeyCode::Backspace)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.pop();
+                        app.actions.app_sel = 0;
+                    }
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.push(c);
+                        app.actions.app_sel = 0;
+                    }
 
                     // Sync tab — j/k navigate the app list, space/enter toggle, w save
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
@@ -825,7 +1051,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     (_, KeyCode::PageDown) => { app.scroll = app.scroll.saturating_add(10); }
                     (_, KeyCode::PageUp)   => { app.scroll = app.scroll.saturating_sub(10); }
-                    // Output select (Remaps / CapsLayer tabs)
+                    // Output select (Remaps / Layers tabs)
                     (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) => {
                         app.output_idx = 0;
                     }
