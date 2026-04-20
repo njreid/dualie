@@ -921,40 +921,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // Clear message on any keypress.
                 app.message = None;
 
+                // True when a text input field has focus — global hotkeys must not fire.
+                let in_search = app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search;
+
                 match (key.modifiers, key.code) {
-                    // Quit
-                    (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                    // Ctrl-C always quits, even in search mode.
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                         return Ok(());
                     }
-                    // Layers tab — h/l switch between layers
-                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers => {
-                        app.layers_selected = (app.layers_selected + 1).min(0); // clamp to known layers
-                        app.scroll = 0;
+                    // Quit — not in search mode.
+                    (_, KeyCode::Char('q')) if !in_search => {
+                        return Ok(());
                     }
-                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers => {
-                        app.layers_selected = app.layers_selected.saturating_sub(1);
-                        app.scroll = 0;
-                    }
-                    // Tab navigation
-                    (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l')) => {
-                        app.tab = app.tab.next();
-                        app.scroll = 0;
-                    }
-                    (KeyModifiers::SHIFT, KeyCode::BackTab)
-                    | (_, KeyCode::Left)
-                    | (_, KeyCode::Char('h')) => {
-                        app.tab = app.tab.prev();
-                        app.scroll = 0;
-                    }
-                    // Number keys 1-6 select tab directly
-                    (_, KeyCode::Char('1')) => { app.tab = Tab::Status;    app.scroll = 0; }
-                    (_, KeyCode::Char('2')) => { app.tab = Tab::Remaps;    app.scroll = 0; }
-                    (_, KeyCode::Char('3')) => { app.tab = Tab::Layers; app.scroll = 0; }
-                    (_, KeyCode::Char('4')) => { app.tab = Tab::Config;    app.scroll = 0; }
-                    (_, KeyCode::Char('5')) => { app.tab = Tab::Sync;      app.scroll = 0; }
-                    (_, KeyCode::Char('6')) => { app.tab = Tab::Actions;   app.scroll = 0; }
 
-                    // Actions tab — Search mode: type to filter, j/k navigate, Enter confirm, Esc cancel
+                    // ── Actions search mode — all keys consumed here ──────────
                     (_, KeyCode::Esc)
                         if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
                     {
@@ -976,6 +956,31 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                     }
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.move_down();
+                    }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.move_up();
+                    }
+                    (_, KeyCode::Backspace)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.pop();
+                        app.actions.app_sel = 0;
+                    }
+                    // Catch-all for printable chars in search — must come before global hotkeys.
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.push(c);
+                        app.actions.app_sel = 0;
+                    }
+
+                    // ── Actions browse mode ───────────────────────────────────
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
                         if app.tab == Tab::Actions =>
                     {
                         app.actions.move_down();
@@ -985,10 +990,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     {
                         app.actions.move_up();
                     }
-                    (_, KeyCode::Char('n'))
-                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Browse =>
-                    {
-                        // Lazy-load installed apps on first open.
+                    (_, KeyCode::Char('n')) if app.tab == Tab::Actions => {
                         if app.actions.all_apps.is_none() {
                             app.actions.all_apps = Some(list_gui_apps().unwrap_or_default());
                         }
@@ -996,20 +998,42 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.actions.query.clear();
                         app.actions.app_sel = 0;
                     }
-                    (_, KeyCode::Backspace)
-                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
-                    {
-                        app.actions.query.pop();
-                        app.actions.app_sel = 0;
+
+                    // ── Layers tab — h/l switch layers (before global tab nav) ─
+                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers => {
+                        app.layers_selected = (app.layers_selected + 1).min(0);
+                        app.scroll = 0;
                     }
-                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
-                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
-                    {
-                        app.actions.query.push(c);
-                        app.actions.app_sel = 0;
+                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers => {
+                        app.layers_selected = app.layers_selected.saturating_sub(1);
+                        app.scroll = 0;
                     }
 
-                    // Sync tab — j/k navigate the app list, space/enter toggle, w save
+                    // ── Global tab navigation (blocked in search mode) ────────
+                    (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l'))
+                        if !in_search =>
+                    {
+                        app.tab = app.tab.next();
+                        app.scroll = 0;
+                    }
+                    (KeyModifiers::SHIFT, KeyCode::BackTab)
+                    | (_, KeyCode::Left) => {
+                        app.tab = app.tab.prev();
+                        app.scroll = 0;
+                    }
+                    (_, KeyCode::Char('h')) if !in_search => {
+                        app.tab = app.tab.prev();
+                        app.scroll = 0;
+                    }
+                    // Number keys 1-6 select tab directly (blocked in search mode).
+                    (_, KeyCode::Char('1')) if !in_search => { app.tab = Tab::Status;  app.scroll = 0; }
+                    (_, KeyCode::Char('2')) if !in_search => { app.tab = Tab::Remaps;  app.scroll = 0; }
+                    (_, KeyCode::Char('3')) if !in_search => { app.tab = Tab::Layers;  app.scroll = 0; }
+                    (_, KeyCode::Char('4')) if !in_search => { app.tab = Tab::Config;  app.scroll = 0; }
+                    (_, KeyCode::Char('5')) if !in_search => { app.tab = Tab::Sync;    app.scroll = 0; }
+                    (_, KeyCode::Char('6')) if !in_search => { app.tab = Tab::Actions; app.scroll = 0; }
+
+                    // ── Sync tab ──────────────────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
                         if app.tab == Tab::Sync =>
                     {
@@ -1029,7 +1053,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.save_sync();
                     }
 
-                    // Scroll (other tabs)
+                    // ── Scroll (other tabs) ───────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         app.scroll = app.scroll.saturating_add(1);
                     }
@@ -1038,11 +1062,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     (_, KeyCode::PageDown) => { app.scroll = app.scroll.saturating_add(10); }
                     (_, KeyCode::PageUp)   => { app.scroll = app.scroll.saturating_sub(10); }
+
                     // Output select (Remaps / Layers tabs)
-                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) => {
+                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) if !in_search => {
                         app.output_idx = 0;
                     }
-                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) => {
+                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) if !in_search => {
                         app.output_idx = 1;
                     }
                     // Status tab: manual refresh
@@ -1057,11 +1082,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.open_in_editor();
                         terminal.clear()?;
                     }
-                    // Git actions (available from any tab)
-                    (_, KeyCode::Char('p')) => {
+                    // Git actions (not in search mode)
+                    (_, KeyCode::Char('p')) if !in_search => {
                         app.git_pull();
                     }
-                    (_, KeyCode::Char('u')) => {
+                    (_, KeyCode::Char('u')) if !in_search => {
                         app.git_push();
                     }
                     _ => {}
