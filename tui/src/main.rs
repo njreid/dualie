@@ -609,19 +609,6 @@ fn default_socket_path() -> String {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return format!("{dir}/dualie/daemon.sock");
     }
-    // Can't know the daemon's pid; fall back to a glob search.
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            if s.starts_with("dualie-") {
-                let sock = e.path().join("daemon.sock");
-                if sock.exists() {
-                    return sock.to_string_lossy().into_owned();
-                }
-            }
-        }
-    }
     "/tmp/dualie.sock".into()
 }
 

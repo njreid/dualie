@@ -22,17 +22,16 @@ use crate::config::kdl_config_path;
 // ── Socket path resolution ────────────────────────────────────────────────────
 
 pub fn socket_path() -> PathBuf {
-    // Prefer XDG_RUNTIME_DIR so the socket is on a tmpfs and auto-cleaned on logout.
+    // Prefer XDG_RUNTIME_DIR (Linux standard; not set on macOS by default).
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(dir).join("dualie");
         std::fs::create_dir_all(&p).ok();
         return p.join("daemon.sock");
     }
 
-    // Fallback: /tmp/dualie-<pid>/daemon.sock (unique enough for a daemon)
-    let p = PathBuf::from(format!("/tmp/dualie-{}", std::process::id()));
-    std::fs::create_dir_all(&p).ok();
-    p.join("daemon.sock")
+    // Fixed fallback — a well-known path so dua can always find us without
+    // guessing among stale /tmp/dualie-<pid> directories from past runs.
+    PathBuf::from("/tmp/dualie.sock")
 }
 
 // ── Status payload ────────────────────────────────────────────────────────────
@@ -78,6 +77,11 @@ pub fn spawn() {
                 return;
             }
         };
+
+        // Allow any local user to connect (daemon may run as root via sudo).
+        if let Err(e) = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
+            warn!("status socket chmod: {e}");
+        }
 
         info!("status socket at {}", path.display());
 
