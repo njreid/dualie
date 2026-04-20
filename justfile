@@ -105,9 +105,10 @@ build: firmware-build daemon-build
 # Run all tests
 test: firmware-test daemon-test
 
-# ── Install / uninstall ───────────────────────────────────────────────────────
+# ── Install / uninstall / run ─────────────────────────────────────────────────
 
-# Install daemon binary and dua CLI/TUI to ~/.local/bin, register services
+# Install binaries and service definitions — does NOT start anything.
+# After install: run `just rerun` to start all daemons.
 install: daemon-build
     #!/usr/bin/env bash
     set -e
@@ -115,24 +116,21 @@ install: daemon-build
     install -Dm755 target/release/dualie "${DUALIE_BIN}"
     install -Dm755 target/release/dua "${HOME}/.local/bin/dua"
     if [[ "$(uname)" == "Darwin" ]]; then
-        # ── Root input daemon (LaunchDaemon — runs as root) ────────────────────
+        # ── Root input daemon (LaunchDaemon — installed but NOT loaded) ────────
         INPUT_BIN="/usr/local/bin/dualie-input"
         sudo install -Dm755 target/release/dualie-input "${INPUT_BIN}"
         INPUT_PLIST="/Library/LaunchDaemons/dev.dualie.input.plist"
         sed "s|@INPUT_BIN@|${INPUT_BIN}|g" resources/dev.dualie.input.plist \
             | sudo tee "${INPUT_PLIST}" > /dev/null
-        sudo launchctl unload "${INPUT_PLIST}" 2>/dev/null || true
-        sudo launchctl load "${INPUT_PLIST}"
-        echo "Installed root input daemon (${INPUT_BIN})."
+        echo "Installed root input daemon → ${INPUT_BIN}"
         echo "  → Add ${INPUT_BIN} to System Settings → Privacy & Security → Accessibility"
+        echo "  → Then run: just rerun"
 
-        # ── User daemon (LaunchAgent — runs as current user) ───────────────────
+        # ── User daemon (LaunchAgent — installed but NOT loaded) ───────────────
         PLIST_DEST="${HOME}/Library/LaunchAgents/dev.dualie.plist"
         mkdir -p "${HOME}/Library/LaunchAgents"
         sed "s|@DUALIE_BIN@|${DUALIE_BIN}|g" resources/dev.dualie.plist > "${PLIST_DEST}"
-        launchctl unload "${PLIST_DEST}" 2>/dev/null || true
-        launchctl load "${PLIST_DEST}"
-        echo "Installed and loaded user daemon (${DUALIE_BIN})."
+        echo "Installed user daemon → ${DUALIE_BIN}"
     else
         # Add user to input group if not already a member (for evdev access)
         if ! groups | grep -q '\binput\b'; then
@@ -143,11 +141,39 @@ install: daemon-build
         mkdir -p "${HOME}/.config/systemd/user"
         cp resources/dualie.service "${HOME}/.config/systemd/user/"
         systemctl --user daemon-reload
-        systemctl --user enable --now dualie.service
-        echo "Installed and enabled systemd user service."
+        echo "Installed systemd user service (not started — run: just rerun)"
     fi
 
-# Uninstall daemon and service
+# Kill all running daemon components and restart them.
+# Prompts for sudo password to manage the root input daemon on macOS.
+rerun:
+    #!/usr/bin/env bash
+    set -e
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # ── Stop ──────────────────────────────────────────────────────────────
+        echo "→ Stopping daemons…"
+        launchctl unload "${HOME}/Library/LaunchAgents/dev.dualie.plist" 2>/dev/null || true
+        sudo launchctl unload /Library/LaunchDaemons/dev.dualie.input.plist 2>/dev/null || true
+        # Kill any stray processes not managed by launchctl
+        pkill -x dualie       2>/dev/null || true
+        sudo pkill -x dualie-input 2>/dev/null || true
+        sleep 0.5
+
+        # ── Start ─────────────────────────────────────────────────────────────
+        echo "→ Starting root input daemon (dualie-input)…"
+        sudo launchctl load /Library/LaunchDaemons/dev.dualie.input.plist
+        sleep 0.3
+
+        echo "→ Starting user daemon (dualie)…"
+        launchctl load "${HOME}/Library/LaunchAgents/dev.dualie.plist"
+        echo "✓ Done. Logs: /tmp/dualie-input.log  /tmp/dualie.log"
+    else
+        echo "→ Restarting dualie systemd service…"
+        systemctl --user restart dualie.service
+        echo "✓ Done."
+    fi
+
+# Uninstall binaries and service definitions (stops running daemons first).
 uninstall:
     #!/usr/bin/env bash
     if [[ "$(uname)" == "Darwin" ]]; then
