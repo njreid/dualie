@@ -437,7 +437,7 @@ sync {
 "#;
 
 fn kdl_config_path() -> std::path::PathBuf {
-    if let Some(proj) = directories::ProjectDirs::from("", "", "dualie") {
+    if let Some(proj) = directories::ProjectDirs::from("dev", "dualie", "dualie") {
         proj.config_dir().join("dualie.kdl")
     } else {
         std::path::PathBuf::from("dualie.kdl")

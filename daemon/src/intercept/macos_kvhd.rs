@@ -17,12 +17,13 @@
 ///
 /// Client socket: a unique path we create in `.../vhidd_client/<hex_nanos>.sock`
 ///
-/// Message wire format:
-///   byte 0:   'c'
-///   byte 1:   'p'
-///   bytes 2-3: protocol_version = 5 (u16 LE)
-///   byte 4:   request (u8 enum)
-///   bytes 5+: packed payload
+/// Message wire format (pqrs local_datagram framing + service protocol):
+///   byte 0:    send_entry::type = 0x01 (user_data)
+///   byte 1:    'c'
+///   byte 2:    'p'
+///   bytes 3-4: protocol_version = 5 (u16 LE)
+///   byte 5:    request (u8 enum)
+///   bytes 6+:  packed payload
 ///
 /// Keyboard report payload (request = 7 = post_keyboard_input_report):
 ///   byte 0:    report_id = 1
@@ -45,7 +46,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 // ── Socket paths ──────────────────────────────────────────────────────────────
 
@@ -71,18 +72,30 @@ enum Request {
 }
 
 #[repr(u8)]
-#[derive(PartialEq)]
+#[allow(dead_code)]
 enum Response {
+    None                    = 0,
+    DriverActivated         = 1,
+    DriverConnected         = 2,
+    DriverVersionMismatched = 3,
     VirtualHidKeyboardReady = 4,
+    VirtualHidPointingReady = 5,
 }
 
 /// Default keyboard parameters (vendor=0x16c0, product=0x27db, country=0).
 /// Matches `virtual_hid_keyboard_parameters` defaults in the pqrs library.
-const KBD_PARAMS: [u8; 6] = [
-    0xc0, 0x16,  // vendor_id  = 0x16c0 LE
-    0xdb, 0x27,  // product_id = 0x27db LE
-    0x00, 0x00,  // country_code = 0 LE
-];
+///
+/// Each field is `pqrs::hid::*::value_t` which wraps `uint64_t` LE.
+/// Layout: [vendor_id: u64 LE][product_id: u64 LE][country_code: u64 LE] = 24 bytes.
+const KBD_PARAMS: [u8; 24] = {
+    let mut b = [0u8; 24];
+    // vendor_id = 0x16c0
+    b[0] = 0xc0; b[1] = 0x16;
+    // product_id = 0x27db (bytes 8..16)
+    b[8] = 0xdb; b[9] = 0x27;
+    // country_code = 0 (bytes 16..24) — already zero
+    b
+};
 
 // ── KvhdHandle ────────────────────────────────────────────────────────────────
 
@@ -115,7 +128,10 @@ impl KvhdHandle {
     }
 
     fn initialize_keyboard(&self) -> Result<()> {
+        info!("macOS: KVHD sending initialize to {}", self.server_path.display());
+        info!("macOS: KVHD client socket: {}", self.client_path.display());
         let msg = build_message(Request::VirtualHidKeyboardInitialize, &KBD_PARAMS);
+        info!("macOS: KVHD init msg len={} bytes={:02x?}", msg.len(), &msg[..msg.len().min(16)]);
         self.send(&msg)?;
         self.wait_keyboard_ready()
     }
@@ -141,17 +157,25 @@ impl KvhdHandle {
             )
         };
         if ret < 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let e = std::io::Error::last_os_error();
+            // ENOBUFS: daemon's receive buffer full — drop this report silently.
+            if e.raw_os_error() == Some(libc::ENOBUFS) {
+                return Ok(());
+            }
+            return Err(e.into());
         }
         Ok(())
     }
 
-    /// Wait up to 3s for a `virtual_hid_keyboard_ready(true)` response.
+    /// Wait up to 10s for a `virtual_hid_keyboard_ready(true)` response.
+    ///
+    /// Protocol flow (mirrors pqrs C++ example client):
+    ///   1. We send initialize → daemon sends driver_activated(true), driver_connected(true)
+    ///   2. On driver_connected(true), re-send initialize → daemon sends virtual_hid_keyboard_ready(true)
     fn wait_keyboard_ready(&self) -> Result<()> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut buf = [0u8; 64];
         loop {
-            // Poll with a short timeout.
             let remaining_ms = deadline.saturating_duration_since(std::time::Instant::now()).as_millis();
             if remaining_ms == 0 {
                 bail!("timed out waiting for virtual_hid_keyboard_ready");
@@ -161,26 +185,41 @@ impl KvhdHandle {
                 events:  libc::POLLIN,
                 revents: 0,
             };
-            let ret = unsafe { libc::poll(&mut pfd, 1, remaining_ms.min(200) as libc::c_int) };
+            let ret = unsafe { libc::poll(&mut pfd, 1, remaining_ms.min(500) as libc::c_int) };
             if ret < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted { continue; }
                 return Err(e.into());
             }
             if ret == 0 {
-                // Timeout slice — re-send initialize in case the daemon wasn't ready.
+                // Timeout slice — re-send initialize in case the daemon wasn't listening yet.
+                debug!("macOS: KVHD poll timeout, re-sending initialize");
                 let msg = build_message(Request::VirtualHidKeyboardInitialize, &KBD_PARAMS);
-                let _ = self.send(&msg);
+                if let Err(e) = self.send(&msg) {
+                    warn!("macOS: KVHD re-send failed: {e}");
+                }
                 continue;
             }
             let n = unsafe {
                 libc::recv(self.client_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
             };
-            if n < 2 { continue; }
-            // Response format: [response_type: u8][value: u8]
-            if buf[0] == Response::VirtualHidKeyboardReady as u8 && buf[1] == 1 {
+            debug!("macOS: KVHD recv n={n} bytes={:02x?}", &buf[..n.max(0) as usize]);
+            // Response: [type: u8 = 0x01][response_enum: u8][value: u8]
+            if n < 3 { continue; }
+            if buf[0] != 0x01 { continue; } // skip heartbeats
+            let resp = buf[1];
+            let val  = buf[2];
+            info!("macOS: KVHD response resp={resp} val={val}");
+            if resp == Response::DriverConnected as u8 && val == 1 {
+                // Re-send initialize on driver_connected — this is what triggers keyboard_ready.
+                info!("macOS: KVHD driver connected — re-sending keyboard initialize");
+                let msg = build_message(Request::VirtualHidKeyboardInitialize, &KBD_PARAMS);
+                let _ = self.send(&msg);
+            } else if resp == Response::VirtualHidKeyboardReady as u8 && val == 1 {
                 info!("macOS: Karabiner VirtualHIDKeyboard ready");
                 return Ok(());
+            } else if resp == Response::DriverVersionMismatched as u8 && val == 1 {
+                bail!("Karabiner VirtualHIDDevice driver version mismatch — update Karabiner-DriverKit-VirtualHIDDevice");
             }
         }
     }
@@ -230,7 +269,10 @@ pub fn build_report(modifier_bits: u8, pressed: &std::collections::HashSet<u8>) 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn build_message(req: Request, payload: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(5 + payload.len());
+    // pqrs local_datagram framing: every datagram starts with a type byte.
+    // 0x00 = heartbeat, 0x01 = user_data.
+    let mut msg = Vec::with_capacity(1 + 5 + payload.len());
+    msg.push(0x01); // send_entry::type::user_data
     msg.extend_from_slice(&MAGIC);
     msg.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     msg.push(req as u8);

@@ -121,12 +121,17 @@ extern "C" {
     );
 
     fn IOHIDDeviceOpen(device: IOHIDDeviceRef, options: u32) -> IOReturn;
+    fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) -> *mut c_void;
 
     fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> i64;
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
     fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
     fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
+    fn IOHIDElementGetDevice(element: IOHIDElementRef) -> IOHIDDeviceRef;
 }
+
+const kIOHIDVendorIDKey_str:  &[u8] = b"VendorID\0";
+const kIOHIDProductIDKey_str: &[u8] = b"ProductID\0";
 
 // kIOHIDDeviceUsagePageKey / kIOHIDDeviceUsageKey are #define macros in
 // IOKit headers, not exported symbols.  Build CFString refs at runtime.
@@ -155,6 +160,11 @@ extern "C" {
         the_type:  i32,         // kCFNumberSInt32Type = 3
         value_ptr: *const c_void,
     ) -> *mut c_void;
+    fn CFNumberGetValue(
+        number:   *const c_void,
+        the_type: i32,          // kCFNumberSInt32Type = 3
+        value_ptr: *mut c_void,
+    ) -> bool;
     fn CFRelease(cf: *mut c_void);
 
     static kCFAllocatorDefault:              CFAllocatorRef;
@@ -194,16 +204,37 @@ thread_local! {
 
 // ── IOHIDManager callbacks ────────────────────────────────────────────────────
 
+/// Read a u32 IOHIDDevice property by key string (e.g. "VendorID").
+unsafe fn hid_device_u32(device: IOHIDDeviceRef, key_str: &[u8]) -> Option<u32> {
+    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+    const kCFNumberSInt32Type:   i32 = 3;
+    let cf_key = CFStringCreateWithCString(kCFAllocatorDefault, key_str.as_ptr(), kCFStringEncodingUTF8);
+    let cf_val = IOHIDDeviceGetProperty(device, cf_key as CFStringRef);
+    CFRelease(cf_key as *mut c_void);
+    if cf_val.is_null() { return None; }
+    let mut v: i32 = 0;
+    CFNumberGetValue(cf_val, kCFNumberSInt32Type, &mut v as *mut _ as *mut c_void);
+    Some(v as u32)
+}
+
 /// Called when a new keyboard device is found — seize it exclusively.
+/// Skip the Karabiner virtual keyboard (vendor=0x16c0, product=0x27db) to
+/// avoid a feedback loop where our own injected events get re-intercepted.
 unsafe extern "C" fn device_added(
     _context: *mut c_void,
     _result:  IOReturn,
     _sender:  *mut c_void,
     device:   IOHIDDeviceRef,
 ) {
+    let vendor  = hid_device_u32(device, kIOHIDVendorIDKey_str).unwrap_or(0);
+    let product = hid_device_u32(device, kIOHIDProductIDKey_str).unwrap_or(0);
+    if vendor == 0x16c0 && product == 0x27db {
+        info!("macOS: skipping Karabiner virtual keyboard (vendor={vendor:#06x} product={product:#06x})");
+        return;
+    }
     let ret = IOHIDDeviceOpen(device, kIOHIDOptionsTypeSeizeDevice);
     if ret == kIOReturnSuccess {
-        info!("macOS: keyboard device seized");
+        info!("macOS: keyboard device seized (vendor={vendor:#06x} product={product:#06x})");
     } else {
         warn!("macOS: failed to seize keyboard device: {ret:#x} (need Accessibility permission?)");
     }
@@ -216,7 +247,7 @@ unsafe extern "C" fn value_available(
     _sender:  *mut c_void,
     value:    IOHIDValueRef,
 ) {
-    let element   = IOHIDValueGetElement(value);
+    let element    = IOHIDValueGetElement(value);
     let usage_page = IOHIDElementGetUsagePage(element);
 
     // Only handle keyboard usage page (0x07).
@@ -224,8 +255,21 @@ unsafe extern "C" fn value_available(
         return;
     }
 
-    let usage     = IOHIDElementGetUsage(element) as u8; // HID keycode
-    let int_value = IOHIDValueGetIntegerValue(value);     // 1 = down, 0 = up
+    // Ignore events from the Karabiner virtual keyboard — we inject into it,
+    // so its events would create a feedback loop.
+    let device  = IOHIDElementGetDevice(element);
+    let vendor  = hid_device_u32(device, kIOHIDVendorIDKey_str).unwrap_or(0);
+    let product = hid_device_u32(device, kIOHIDProductIDKey_str).unwrap_or(0);
+    if vendor == 0x16c0 && product == 0x27db {
+        return;
+    }
+
+    let usage     = IOHIDElementGetUsage(element) as u8;
+    let int_value = IOHIDValueGetIntegerValue(value); // 0 = up, 1 = down
+
+    // IOHIDManager does not deliver key-repeat events — the OS handles repeat
+    // at a higher layer (IOHIDSystem) after we seize the device.  Every non-zero
+    // value here is a genuine key-down; we never get VALUE_REPEAT from this path.
     let ev_value  = if int_value != 0 { VALUE_DOWN } else { VALUE_UP };
 
     let modifier_bit = hid_modifier_bit(usage);
@@ -257,10 +301,13 @@ unsafe extern "C" fn value_available(
         }
 
         for syn in &result.events {
-            match syn.value {
-                VALUE_DOWN => { state.virtual_pressed.insert(syn.hid); }
-                VALUE_UP   => { state.virtual_pressed.remove(&syn.hid); }
-                _          => {}
+            // hid==0 means modifier-only report; don't track 0 in the key set.
+            if syn.hid != 0 {
+                match syn.value {
+                    VALUE_DOWN => { state.virtual_pressed.insert(syn.hid); }
+                    VALUE_UP   => { state.virtual_pressed.remove(&syn.hid); }
+                    _          => {}
+                }
             }
             let report = build_report(syn.modifiers, &state.virtual_pressed);
             if let Err(e) = state.kvhd.post_report(&report) {
@@ -375,7 +422,7 @@ pub fn run(
 
         IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
 
-        let ret = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
+        let ret = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeSeizeDevice);
         if ret != kIOReturnSuccess {
             bail!("IOHIDManagerOpen failed: {ret:#x}");
         }
