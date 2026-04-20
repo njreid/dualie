@@ -9,6 +9,10 @@ license     = "GPL-3.0"
 name = "dualie"
 path = "src/main.rs"
 
+[[bin]]
+name = "dualie-input"
+path = "src/bin/dualie_input.rs"
+
 [dependencies]
 dualie-proto = { path = "../proto" }
 

@@ -12,6 +12,7 @@
 
 use anyhow::Result;
 use dualie_proto::{DualieMessage, SerialPeer, SerialPeerWriter};
+use dualie_proto::input_proto::FromInput;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -41,14 +42,34 @@ const TX_QUEUE: usize = 64;
 /// Cloneable handle for sending messages to the RP2040 over CDC-ACM serial.
 ///
 /// Messages sent while disconnected are silently dropped.
+///
+/// When constructed via `with_event_sender`, `DualieMessage` side-effects
+/// (ActiveOutput, ClipboardPull) are forwarded as `FromInput` events to the
+/// user daemon via a std mpsc instead of the serial wire.
 #[derive(Clone)]
 pub struct SerialClient {
-    inner: Arc<Mutex<Option<mpsc::Sender<DualieMessage>>>>,
+    inner:        Arc<Mutex<Option<mpsc::Sender<DualieMessage>>>>,
+    event_bridge: Option<Arc<std::sync::Mutex<std::sync::mpsc::Sender<FromInput>>>>,
 }
 
 impl SerialClient {
     fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(None)) }
+        Self { inner: Arc::new(Mutex::new(None)), event_bridge: None }
+    }
+
+    /// A no-op client: all sends are silently dropped.
+    pub fn noop() -> Self {
+        Self::new()
+    }
+
+    /// A bridge client used inside `dualie-input`.
+    /// Translates DualieMessage side-effects into `FromInput` events forwarded
+    /// to the user daemon over the Unix socket.
+    pub fn with_event_sender(tx: std::sync::mpsc::Sender<FromInput>) -> Self {
+        Self {
+            inner:        Arc::new(Mutex::new(None)),
+            event_bridge: Some(Arc::new(std::sync::Mutex::new(tx))),
+        }
     }
 
     async fn set_sender(&self, tx: Option<mpsc::Sender<DualieMessage>>) {
@@ -57,8 +78,19 @@ impl SerialClient {
     }
 
     /// Send a message to the RP2040.  Silently drops if disconnected or queue full.
-    /// Used by the intercept layer (Phase 3+) to push ActiveOutput changes.
+    /// When an event bridge is set, translates relevant messages to `FromInput`.
     pub async fn send(&self, msg: DualieMessage) {
+        if let Some(bridge) = &self.event_bridge {
+            let event = match &msg {
+                DualieMessage::ActiveOutput { output } => Some(FromInput::SwitchOutput(*output)),
+                DualieMessage::ClipboardPull            => Some(FromInput::ClipPull),
+                _                                       => None,
+            };
+            if let Some(ev) = event {
+                let _ = bridge.lock().unwrap().send(ev);
+                return;
+            }
+        }
         if let Some(tx) = self.inner.lock().await.as_ref() {
             let _ = tx.try_send(msg);
         }

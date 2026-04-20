@@ -81,7 +81,7 @@ flash: firmware-build
 
 # ── Daemon ────────────────────────────────────────────────────────────────────
 
-# Build the daemon binary and dua CLI/TUI
+# Build the daemon binary, root input daemon, and dua CLI/TUI
 daemon-build:
     cargo build --release -p dualie -p dua
 
@@ -107,7 +107,7 @@ test: firmware-test daemon-test
 
 # ── Install / uninstall ───────────────────────────────────────────────────────
 
-# Install daemon binary and dua CLI/TUI to ~/.local/bin, register the user service
+# Install daemon binary and dua CLI/TUI to ~/.local/bin, register services
 install: daemon-build
     #!/usr/bin/env bash
     set -e
@@ -115,13 +115,24 @@ install: daemon-build
     install -Dm755 target/release/dualie "${DUALIE_BIN}"
     install -Dm755 target/release/dua "${HOME}/.local/bin/dua"
     if [[ "$(uname)" == "Darwin" ]]; then
+        # ── Root input daemon (LaunchDaemon — runs as root) ────────────────────
+        INPUT_BIN="/usr/local/bin/dualie-input"
+        sudo install -Dm755 target/release/dualie-input "${INPUT_BIN}"
+        INPUT_PLIST="/Library/LaunchDaemons/dev.dualie.input.plist"
+        sed "s|@INPUT_BIN@|${INPUT_BIN}|g" resources/dev.dualie.input.plist \
+            | sudo tee "${INPUT_PLIST}" > /dev/null
+        sudo launchctl unload "${INPUT_PLIST}" 2>/dev/null || true
+        sudo launchctl load "${INPUT_PLIST}"
+        echo "Installed root input daemon (${INPUT_BIN})."
+        echo "  → Add ${INPUT_BIN} to System Settings → Privacy & Security → Accessibility"
+
+        # ── User daemon (LaunchAgent — runs as current user) ───────────────────
         PLIST_DEST="${HOME}/Library/LaunchAgents/dev.dualie.plist"
         mkdir -p "${HOME}/Library/LaunchAgents"
         sed "s|@DUALIE_BIN@|${DUALIE_BIN}|g" resources/dev.dualie.plist > "${PLIST_DEST}"
         launchctl unload "${PLIST_DEST}" 2>/dev/null || true
         launchctl load "${PLIST_DEST}"
-        echo "Installed and loaded launchd service."
-        echo "  → Add ${DUALIE_BIN} to System Settings → Privacy & Security → Accessibility"
+        echo "Installed and loaded user daemon (${DUALIE_BIN})."
     else
         # Add user to input group if not already a member (for evdev access)
         if ! groups | grep -q '\binput\b'; then
@@ -142,6 +153,8 @@ uninstall:
     if [[ "$(uname)" == "Darwin" ]]; then
         launchctl unload "${HOME}/Library/LaunchAgents/dev.dualie.plist" 2>/dev/null || true
         rm -f "${HOME}/Library/LaunchAgents/dev.dualie.plist"
+        sudo launchctl unload /Library/LaunchDaemons/dev.dualie.input.plist 2>/dev/null || true
+        sudo rm -f /Library/LaunchDaemons/dev.dualie.input.plist /usr/local/bin/dualie-input
     else
         systemctl --user disable --now dualie.service 2>/dev/null || true
         rm -f "${HOME}/.config/systemd/user/dualie.service"

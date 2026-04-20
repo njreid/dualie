@@ -7,6 +7,7 @@ mod clipboard;
 mod config;
 mod file_sync;
 mod git_sync;
+mod input_bridge;
 mod intercept;
 mod launch;
 mod peer;
@@ -104,15 +105,25 @@ async fn main() -> Result<()> {
         file_sync::spawn(cfg_rx.clone(), serial_client.clone(), local_for_sync.machine_name);
     }
 
-    // ── Key interceptor (dedicated OS thread — evdev blocks) ─────────────────
-    let cfg_for_intercept = cfg_rx.clone();
-    let serial_for_intercept = serial_client.clone();
-    let active_for_intercept = active_output.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = intercept::run(cfg_for_intercept, serial_for_intercept, active_for_intercept) {
-            tracing::error!("key interceptor: {e}");
-        }
-    });
+    // ── Key interceptor ───────────────────────────────────────────────────────
+    // On macOS: keyboard capture runs in the root `dualie-input` daemon.
+    // The user daemon connects to it via the input bridge.
+    //
+    // On Linux: evdev works as the `input` group user; run intercept directly.
+    #[cfg(target_os = "macos")]
+    input_bridge::spawn(cfg_rx.clone(), active_output.clone(), serial_client.clone());
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let cfg_for_intercept    = cfg_rx.clone();
+        let serial_for_intercept = serial_client.clone();
+        let active_for_intercept = active_output.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = intercept::run(cfg_for_intercept, serial_for_intercept, active_for_intercept) {
+                tracing::error!("key interceptor: {e}");
+            }
+        });
+    }
 
     // Park the main task forever; all work is in spawned tasks/threads.
     std::future::pending::<()>().await;
