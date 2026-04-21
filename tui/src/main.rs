@@ -11,8 +11,8 @@
 ///   1  Status      — live daemon status polled from the Unix socket
 ///   2  Remaps      — key and modifier remaps for the selected output
 ///   3  Caps layer  — caps-layer binding table for the selected output
-///   4  Config      — raw KDL config with reload / open-in-$EDITOR
-///   5  Sync        — per-app config-file sync registry; toggle apps on/off
+///   4  Sync        — per-app config-file sync registry; toggle apps on/off
+///   5  Actions     — virtual key bindings
 
 mod app_registry;
 mod ipc;
@@ -21,7 +21,8 @@ mod ui;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -60,6 +61,14 @@ enum Cmd {
         #[arg(value_name = "FILTER")]
         filter: Option<String>,
     },
+    /// Print shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Open the Dualie config file in $EDITOR
+    Config,
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -68,21 +77,21 @@ enum Cmd {
 pub enum Tab {
     Status,
     Remaps,
-    CapsLayer,
-    Config,
+    Layers,
     Sync,
+    Actions,
 }
 
 impl Tab {
-    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::CapsLayer, Tab::Config, Tab::Sync];
+    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Actions, Tab::Sync];
 
     fn title(self) -> &'static str {
         match self {
             Tab::Status    => "Status",
             Tab::Remaps    => "Remaps",
-            Tab::CapsLayer => "Caps Layer",
-            Tab::Config    => "Config",
+            Tab::Layers    => "Layers",
             Tab::Sync      => "Sync",
+            Tab::Actions   => "Actions",
         }
     }
 
@@ -99,6 +108,22 @@ impl Tab {
         let i = (self.index() + Self::ALL.len() - 1) % Self::ALL.len();
         Self::ALL[i]
     }
+}
+
+// ── Layers tab state ──────────────────────────────────────────────────────────
+
+/// The mapping types available when adding a new caps-layer entry.
+pub const LAYER_ENTRY_TYPES: &[&str] = &["chord", "swap", "jump-a", "jump-b", "action", "clip-pull"];
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LayersMode {
+    Browse,
+    /// Step 1: pick mapping type.
+    PickType { type_sel: usize },
+    /// Step 2: type the source key name.
+    TypeSrc { entry_type: String, src: String },
+    /// Step 3: type the target (only for chord and action types).
+    TypeTarget { entry_type: String, src: String, target: String },
 }
 
 // ── Sync tab state ────────────────────────────────────────────────────────────
@@ -142,6 +167,161 @@ impl SyncTabState {
     fn move_down(&mut self) {
         if self.selected + 1 < self.rows.len() { self.selected += 1; }
     }
+}
+
+// ── Actions tab state ─────────────────────────────────────────────────────────
+
+/// One configured action as shown in the Actions tab list.
+#[derive(Debug, Clone)]
+pub struct ActionRow {
+    pub label:    String,
+    pub kind:     String,  // "launch" or "shell"
+    pub app_id:   String,  // bundle ID or command
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ActionsMode {
+    /// Browsing the existing actions list.
+    Browse,
+    /// App-picker: searching installed apps to add a new action.
+    Search,
+}
+
+pub struct ActionsTabState {
+    /// Existing actions parsed from the KDL config.
+    pub rows:     Vec<ActionRow>,
+    pub selected: usize,
+    pub mode:     ActionsMode,
+    /// Search query typed by the user.
+    pub query:    String,
+    /// All installed apps (loaded lazily on first Search entry).
+    pub all_apps: Option<Vec<(String, String)>>,  // (app_id, display_name)
+    /// Index into the filtered results list.
+    pub app_sel:  usize,
+}
+
+impl ActionsTabState {
+    pub fn load(config_text: &str) -> Self {
+        Self {
+            rows:     parse_actions_from_kdl(config_text),
+            selected: 0,
+            mode:     ActionsMode::Browse,
+            query:    String::new(),
+            all_apps: None,
+            app_sel:  0,
+        }
+    }
+
+    /// Filtered apps matching the current query.
+    pub fn filtered_apps(&self) -> Vec<&(String, String)> {
+        let apps = match &self.all_apps {
+            Some(a) => a,
+            None => return vec![],
+        };
+        if self.query.is_empty() {
+            return apps.iter().collect();
+        }
+        let q = self.query.to_ascii_lowercase();
+        apps.iter()
+            .filter(|(id, name)| {
+                name.to_ascii_lowercase().contains(&q) || id.to_ascii_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    pub fn move_up(&mut self) {
+        match self.mode {
+            ActionsMode::Browse => { if self.selected > 0 { self.selected -= 1; } }
+            ActionsMode::Search => { if self.app_sel > 0 { self.app_sel -= 1; } }
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        match self.mode {
+            ActionsMode::Browse => {
+                if self.selected + 1 < self.rows.len() { self.selected += 1; }
+            }
+            ActionsMode::Search => {
+                let count = self.filtered_apps().len();
+                if self.app_sel + 1 < count { self.app_sel += 1; }
+            }
+        }
+    }
+}
+
+/// Parse all `launch`/`shell` actions from any machine block in the KDL source.
+fn parse_actions_from_kdl(src: &str) -> Vec<ActionRow> {
+    let mut rows = Vec::new();
+    let Ok(doc) = src.parse::<kdl::KdlDocument>() else { return rows };
+    for node in doc.nodes() {
+        if node.name().value() != "machine" { continue; }
+        let Some(children) = node.children() else { continue };
+        for child in children.nodes() {
+            if child.name().value() != "actions" { continue; }
+            let Some(ac) = child.children() else { continue };
+            for action in ac.nodes() {
+                let kind = action.name().value();
+                if kind != "launch" && kind != "shell" { continue; }
+                let label = action.entries().iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_string())
+                    .unwrap_or("?")
+                    .to_owned();
+                let app_id = action.entries().iter()
+                    .find(|e| e.name().is_some_and(|n| n.value() == "app-id" || n.value() == "command"))
+                    .and_then(|e| e.value().as_string())
+                    .unwrap_or("")
+                    .to_owned();
+                rows.push(ActionRow { label, kind: kind.to_owned(), app_id });
+            }
+        }
+    }
+    rows
+}
+
+/// Append a `launch` action to the `machine *` actions block (creating it if absent).
+pub fn write_launch_action(src: &str, label: &str, app_id: &str) -> String {
+    let new_line = format!("        launch {label:?} app-id={app_id:?}\n");
+
+    // Try to insert into existing `machine * { actions { ... } }`.
+    if let Some(pos) = find_actions_insertion_point(src) {
+        let mut out = src.to_owned();
+        out.insert_str(pos, &new_line);
+        return out;
+    }
+
+    // No machine * actions block — create one at the end.
+    let block = format!("\nmachine * {{\n    actions {{\n{new_line}    }}\n}}\n");
+    format!("{src}{block}")
+}
+
+/// Find the byte offset just before the closing `}` of the first `actions` block
+/// inside a `machine *` or `machine` node.
+fn find_actions_insertion_point(src: &str) -> Option<usize> {
+    // Locate `machine *` or any machine node containing `actions {`.
+    let machine_pos = src.find("machine *")?;
+    let after_machine = &src[machine_pos..];
+    let actions_rel = after_machine.find("actions {")?;
+    let actions_start = machine_pos + actions_rel;
+    // Find the matching closing `}` for the actions block.
+    let after_actions = &src[actions_start + "actions {".len()..];
+    let close_rel = after_actions.find('}')?;
+    Some(actions_start + "actions {".len() + close_rel)
+}
+
+/// Find the byte offset just before the closing `}` of the first `caps` block
+/// inside `machine * { layers { ... } }`.
+fn find_caps_insertion_point(src: &str) -> Option<usize> {
+    let machine_pos = src.find("machine *")?;
+    let after_machine = &src[machine_pos..];
+    let layers_rel = after_machine.find("layers {")?;
+    let layers_abs = machine_pos + layers_rel;
+    let after_layers = &src[layers_abs + "layers {".len()..];
+    let caps_rel = after_layers.find("caps {")?;
+    let caps_abs = layers_abs + "layers {".len() + caps_rel;
+    let after_caps = &src[caps_abs + "caps {".len()..];
+    let close_rel = after_caps.find('}')?;
+    Some(caps_abs + "caps {".len() + close_rel)
 }
 
 /// Parse the `sync { app "..." ... }` block from KDL config text.
@@ -204,7 +384,12 @@ pub struct App {
     pub config_path:  std::path::PathBuf,
     pub scroll:       u16,
     pub output_idx:   usize,  // 0 = A, 1 = B
-    pub sync:         SyncTabState,
+    pub sync:           SyncTabState,
+    pub actions:        ActionsTabState,
+    /// Which layer is shown in the Layers tab (0 = Caps).
+    pub layers_selected: usize,
+    /// Modal state for the "add new layer mapping" wizard.
+    pub layers_mode: LayersMode,
     /// Queued one-line message shown in the footer (errors, info).
     pub message:      Option<String>,
     pub last_refresh: Instant,
@@ -217,7 +402,8 @@ impl App {
     fn new(socket_path: String) -> Self {
         let config_path = kdl_config_path();
         let config_text = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let sync = SyncTabState::load(&config_text);
+        let sync    = SyncTabState::load(&config_text);
+        let actions = ActionsTabState::load(&config_text);
         Self {
             tab:          Tab::Status,
             status:       None,
@@ -227,6 +413,9 @@ impl App {
             scroll:       0,
             output_idx:   0,
             sync,
+            actions,
+            layers_selected: 0,
+            layers_mode:  LayersMode::Browse,
             message:      None,
             last_refresh: Instant::now() - Duration::from_secs(10),
             socket_path,
@@ -250,7 +439,8 @@ impl App {
         match std::fs::read_to_string(&self.config_path) {
             Ok(text) => {
                 self.config_text = text;
-                self.sync = SyncTabState::load(&self.config_text);
+                self.sync    = SyncTabState::load(&self.config_text);
+                self.actions = ActionsTabState::load(&self.config_text);
                 self.message = Some("Config reloaded.".into());
             }
             Err(e) => {
@@ -364,6 +554,45 @@ impl App {
         }
     }
 
+    fn save_action(&mut self, label: String, app_id: String) {
+        let new_src = write_launch_action(&self.config_text, &label, &app_id);
+        match std::fs::write(&self.config_path, &new_src) {
+            Ok(()) => {
+                self.config_text = new_src;
+                self.actions = ActionsTabState::load(&self.config_text);
+                self.message = Some(format!("Added action \"{label}\"."));
+            }
+            Err(e) => { self.message = Some(format!("Save error: {e}")); }
+        }
+    }
+
+    /// Write a new caps-layer entry to `machine * { layers { caps { } } }`.
+    pub fn save_caps_entry(&mut self, entry_type: &str, src: &str, target: &str) {
+        let new_line = match entry_type {
+            "chord" => format!("            chord {src} {target}\n"),
+            "action" => format!("            action {src} \"{target}\"\n"),
+            other => format!("            {other} {src}\n"),
+        };
+
+        let new_src = if let Some(pos) = find_caps_insertion_point(&self.config_text) {
+            let mut out = self.config_text.clone();
+            out.insert_str(pos, &new_line);
+            out
+        } else {
+            // No machine * caps block — create one.
+            let block = format!("\nmachine * {{\n    layers {{\n        caps {{\n{new_line}        }}\n    }}\n}}\n");
+            format!("{}{block}", self.config_text)
+        };
+
+        match std::fs::write(&self.config_path, &new_src) {
+            Ok(()) => {
+                self.config_text = new_src;
+                self.message = Some(format!("Added {entry_type} {src}."));
+            }
+            Err(e) => { self.message = Some(format!("Save error: {e}")); }
+        }
+    }
+
     fn open_in_editor(&mut self) {
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
         let path = self.config_path.to_str().unwrap_or("").to_owned();
@@ -377,10 +606,58 @@ impl App {
     }
 }
 
-// ── Config path (mirrors daemon logic) ───────────────────────────────────────
+// ── Config path and default template ─────────────────────────────────────────
+
+const DEFAULT_CONFIG: &str = r#"// dualie.kdl — Dualie configuration
+// Docs: https://github.com/njreid/dualie
+//
+// ports         — map physical output ports (a/b) to machine names
+// machine <n>   — per-machine key remaps, caps layer, and sync skip list
+// sync          — apps whose config files to sync between machines
+// git-sync      — remote git repo for config versioning
+
+ports {
+    a desk
+    b laptop
+}
+
+machine desk {
+    // remap {
+    //     key capslock esc          // remap a key
+    //     modifier lalt lctrl       // swap modifiers
+    // }
+
+    layers {
+        caps {
+            // chord h left          // caps+H → Left arrow
+            // chord l right         // caps+L → Right arrow
+            // chord k up
+            // chord j down
+            // swap  n               // caps+N → switch to other output
+        }
+    }
+
+    // skip {
+    //     app "hammerspoon"         // don't sync this app to this machine
+    // }
+}
+
+machine laptop {
+}
+
+sync {
+    // app "fish"
+    // app "neovim"
+    // app "git"
+}
+
+// git-sync {
+//     remote "git@github.com:you/dotfiles.git"
+// }
+"#;
 
 fn kdl_config_path() -> std::path::PathBuf {
-    if let Some(proj) = directories::ProjectDirs::from("", "", "dualie") {
+    if let Some(proj) = directories::ProjectDirs::from("dev", "dualie", "dualie") {
         proj.config_dir().join("dualie.kdl")
     } else {
         std::path::PathBuf::from("dualie.kdl")
@@ -390,19 +667,6 @@ fn kdl_config_path() -> std::path::PathBuf {
 fn default_socket_path() -> String {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return format!("{dir}/dualie/daemon.sock");
-    }
-    // Can't know the daemon's pid; fall back to a glob search.
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            if s.starts_with("dualie-") {
-                let sock = e.path().join("daemon.sock");
-                if sock.exists() {
-                    return sock.to_string_lossy().into_owned();
-                }
-            }
-        }
     }
     "/tmp/dualie.sock".into()
 }
@@ -442,6 +706,25 @@ async fn main() -> Result<()> {
         Some(Cmd::ListApps { filter }) => {
             cmd_list_apps(filter.as_deref())?;
         }
+        Some(Cmd::Completions { shell }) => {
+            if shell == Shell::Fish {
+                // clap_complete doesn't emit a global file-completion disable.
+                // Without this, fish falls back to filename completion.
+                println!("complete -c dua -f");
+            }
+            generate(shell, &mut Args::command(), "dua", &mut std::io::stdout());
+        }
+        Some(Cmd::Config) => {
+            let path = kdl_config_path();
+            if !path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, DEFAULT_CONFIG)?;
+            }
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+            std::process::Command::new(&editor).arg(&path).status()?;
+        }
     }
     Ok(())
 }
@@ -459,6 +742,11 @@ fn cmd_status(socket_path: &str) -> Result<()> {
             println!("Git:     {git}");
             if !s.repo_dir.is_empty() {
                 println!("Repo:    {}", s.repo_dir);
+            }
+            if !s.config_error.is_empty() {
+                eprintln!("\nConfig parse error (daemon is running with last good config):");
+                eprintln!("{}", s.config_error);
+                std::process::exit(2);
             }
         }
         Err(e) => {
@@ -631,12 +919,18 @@ fn list_gui_apps_linux() -> Result<Vec<(String, String)>> {
 
 #[cfg(target_os = "macos")]
 fn list_gui_apps_macos() -> Result<Vec<(String, String)>> {
-    use std::io::{BufRead, BufReader};
 
-    let search_dirs = [
+    let mut search_dirs = vec![
         std::path::PathBuf::from("/Applications"),
         std::path::PathBuf::from("/System/Applications"),
     ];
+    // Chrome saved/progressive web apps install here per-user.
+    if let Some(home) = std::env::var_os("HOME") {
+        search_dirs.push(
+            std::path::Path::new(&home)
+                .join("Applications/Chrome Apps.localized"),
+        );
+    }
 
     let mut apps: Vec<(String, String)> = Vec::new();
 
@@ -698,30 +992,209 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // Clear message on any keypress.
                 app.message = None;
 
+                // True when a text input field has focus — global hotkeys must not fire.
+                let in_search = app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search;
+                let in_layers_modal = !matches!(app.layers_mode, LayersMode::Browse);
+                let in_modal = in_search || in_layers_modal;
+
                 match (key.modifiers, key.code) {
-                    // Quit
-                    (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                    // Ctrl-C always quits, even in search mode.
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                         return Ok(());
                     }
-                    // Tab navigation
-                    (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l')) => {
+                    // Quit — not in any modal mode.
+                    (_, KeyCode::Char('q')) if !in_modal => {
+                        return Ok(());
+                    }
+
+                    // ── Layers modal — PickType ───────────────────────────────
+                    (_, KeyCode::Esc) if in_layers_modal => {
+                        app.layers_mode = LayersMode::Browse;
+                    }
+                    (_, KeyCode::Char('j')) | (_, KeyCode::Down)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { ref mut type_sel } = app.layers_mode {
+                            *type_sel = (*type_sel + 1).min(LAYER_ENTRY_TYPES.len() - 1);
+                        }
+                    }
+                    (_, KeyCode::Char('k')) | (_, KeyCode::Up)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { ref mut type_sel } = app.layers_mode {
+                            *type_sel = type_sel.saturating_sub(1);
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::PickType { .. }) =>
+                    {
+                        if let LayersMode::PickType { type_sel } = &app.layers_mode {
+                            let entry_type = LAYER_ENTRY_TYPES[*type_sel].to_owned();
+                            app.layers_mode = LayersMode::TypeSrc { entry_type, src: String::new() };
+                        }
+                    }
+
+                    // ── Layers modal — TypeSrc ────────────────────────────────
+                    (_, KeyCode::Backspace)
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { ref mut src, .. } = app.layers_mode {
+                            src.pop();
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { entry_type, src } = &app.layers_mode {
+                            let entry_type = entry_type.clone();
+                            let src = src.clone();
+                            if entry_type == "chord" || entry_type == "action" {
+                                app.layers_mode = LayersMode::TypeTarget { entry_type, src, target: String::new() };
+                            } else {
+                                app.save_caps_entry(&entry_type, &src, "");
+                                app.layers_mode = LayersMode::Browse;
+                            }
+                        }
+                    }
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if matches!(app.layers_mode, LayersMode::TypeSrc { .. }) =>
+                    {
+                        if let LayersMode::TypeSrc { ref mut src, .. } = app.layers_mode {
+                            src.push(c);
+                        }
+                    }
+
+                    // ── Layers modal — TypeTarget ─────────────────────────────
+                    (_, KeyCode::Backspace)
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { ref mut target, .. } = app.layers_mode {
+                            target.pop();
+                        }
+                    }
+                    (_, KeyCode::Enter)
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { entry_type, src, target } = &app.layers_mode {
+                            let (et, s, t) = (entry_type.clone(), src.clone(), target.clone());
+                            app.save_caps_entry(&et, &s, &t);
+                            app.layers_mode = LayersMode::Browse;
+                        }
+                    }
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if matches!(app.layers_mode, LayersMode::TypeTarget { .. }) =>
+                    {
+                        if let LayersMode::TypeTarget { ref mut target, .. } = app.layers_mode {
+                            target.push(c);
+                        }
+                    }
+
+                    // ── Actions search mode — all keys consumed here ─────────
+                    (_, KeyCode::Esc)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.mode = ActionsMode::Browse;
+                        app.actions.query.clear();
+                        app.actions.app_sel = 0;
+                    }
+                    (_, KeyCode::Enter)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        let filtered = app.actions.filtered_apps();
+                        if let Some((app_id, name)) = filtered.get(app.actions.app_sel) {
+                            let label = name.clone();
+                            let app_id = app_id.clone();
+                            app.actions.mode = ActionsMode::Browse;
+                            app.actions.query.clear();
+                            app.actions.app_sel = 0;
+                            app.save_action(label, app_id);
+                        }
+                    }
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.move_down();
+                    }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.move_up();
+                    }
+                    (_, KeyCode::Backspace)
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.pop();
+                        app.actions.app_sel = 0;
+                    }
+                    // Catch-all for printable chars in search — must come before global hotkeys.
+                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c))
+                        if app.tab == Tab::Actions && app.actions.mode == ActionsMode::Search =>
+                    {
+                        app.actions.query.push(c);
+                        app.actions.app_sel = 0;
+                    }
+
+                    // ── Actions browse mode ───────────────────────────────────
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j'))
+                        if app.tab == Tab::Actions =>
+                    {
+                        app.actions.move_down();
+                    }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k'))
+                        if app.tab == Tab::Actions =>
+                    {
+                        app.actions.move_up();
+                    }
+                    (_, KeyCode::Char('n')) if app.tab == Tab::Actions => {
+                        if app.actions.all_apps.is_none() {
+                            app.actions.all_apps = Some(list_gui_apps().unwrap_or_default());
+                        }
+                        app.actions.mode = ActionsMode::Search;
+                        app.actions.query.clear();
+                        app.actions.app_sel = 0;
+                    }
+
+                    // ── Layers tab — n to add new entry ──────────────────────
+                    (_, KeyCode::Char('n'))
+                        if app.tab == Tab::Layers && !in_layers_modal =>
+                    {
+                        app.layers_mode = LayersMode::PickType { type_sel: 0 };
+                    }
+
+                    // ── Layers tab — h/l switch layers (before global tab nav) ─
+                    (_, KeyCode::Char('l')) if app.tab == Tab::Layers && !in_layers_modal => {
+                        app.layers_selected = (app.layers_selected + 1).min(0);
+                        app.scroll = 0;
+                    }
+                    (_, KeyCode::Char('h')) if app.tab == Tab::Layers && !in_layers_modal => {
+                        app.layers_selected = app.layers_selected.saturating_sub(1);
+                        app.scroll = 0;
+                    }
+
+                    // ── Global tab navigation (blocked in modal mode) ─────────
+                    (_, KeyCode::Tab) | (_, KeyCode::Right) | (_, KeyCode::Char('l'))
+                        if !in_modal =>
+                    {
                         app.tab = app.tab.next();
                         app.scroll = 0;
                     }
                     (KeyModifiers::SHIFT, KeyCode::BackTab)
-                    | (_, KeyCode::Left)
-                    | (_, KeyCode::Char('h')) => {
+                    | (_, KeyCode::Left) => {
                         app.tab = app.tab.prev();
                         app.scroll = 0;
                     }
-                    // Number keys 1-5 select tab directly
-                    (_, KeyCode::Char('1')) => { app.tab = Tab::Status;    app.scroll = 0; }
-                    (_, KeyCode::Char('2')) => { app.tab = Tab::Remaps;    app.scroll = 0; }
-                    (_, KeyCode::Char('3')) => { app.tab = Tab::CapsLayer; app.scroll = 0; }
-                    (_, KeyCode::Char('4')) => { app.tab = Tab::Config;    app.scroll = 0; }
-                    (_, KeyCode::Char('5')) => { app.tab = Tab::Sync;      app.scroll = 0; }
+                    (_, KeyCode::Char('h')) if !in_modal => {
+                        app.tab = app.tab.prev();
+                        app.scroll = 0;
+                    }
+                    // Number keys 1-5 select tab directly (blocked in modal mode).
+                    (_, KeyCode::Char('1')) if !in_modal => { app.tab = Tab::Status;  app.scroll = 0; }
+                    (_, KeyCode::Char('2')) if !in_modal => { app.tab = Tab::Remaps;  app.scroll = 0; }
+                    (_, KeyCode::Char('3')) if !in_modal => { app.tab = Tab::Layers;  app.scroll = 0; }
+                    (_, KeyCode::Char('4')) if !in_modal => { app.tab = Tab::Actions; app.scroll = 0; }
+                    (_, KeyCode::Char('5')) if !in_modal => { app.tab = Tab::Sync;    app.scroll = 0; }
 
-                    // Sync tab — j/k navigate the app list, space/enter toggle, w save
+                    // ── Sync tab ──────────────────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))
                         if app.tab == Tab::Sync =>
                     {
@@ -741,7 +1214,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.save_sync();
                     }
 
-                    // Scroll (other tabs)
+                    // ── Scroll (other tabs) ───────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
                         app.scroll = app.scroll.saturating_add(1);
                     }
@@ -750,30 +1223,28 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     (_, KeyCode::PageDown) => { app.scroll = app.scroll.saturating_add(10); }
                     (_, KeyCode::PageUp)   => { app.scroll = app.scroll.saturating_sub(10); }
-                    // Output select (Remaps / CapsLayer tabs)
-                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) => {
+
+                    // Output select (Remaps / Layers tabs)
+                    (_, KeyCode::Char('a')) | (_, KeyCode::Char('A')) if !in_modal => {
                         app.output_idx = 0;
                     }
-                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) => {
+                    (_, KeyCode::Char('b')) | (_, KeyCode::Char('B')) if !in_modal => {
                         app.output_idx = 1;
                     }
                     // Status tab: manual refresh
                     (_, KeyCode::Char('r')) if app.tab == Tab::Status => {
                         app.refresh_status();
                     }
-                    // Config tab actions
-                    (_, KeyCode::Char('r')) if app.tab == Tab::Config => {
-                        app.reload_config();
-                    }
-                    (_, KeyCode::Char('e')) if app.tab == Tab::Config => {
+                    // Global: open config in $EDITOR
+                    (_, KeyCode::Char('e')) if !in_modal => {
                         app.open_in_editor();
                         terminal.clear()?;
                     }
-                    // Git actions (available from any tab)
-                    (_, KeyCode::Char('p')) => {
+                    // Git actions (not in modal mode)
+                    (_, KeyCode::Char('p')) if !in_modal => {
                         app.git_pull();
                     }
-                    (_, KeyCode::Char('u')) => {
+                    (_, KeyCode::Char('u')) if !in_modal => {
                         app.git_push();
                     }
                     _ => {}

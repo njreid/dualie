@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: @INPUT_BIN@ is replaced by `just install` with the real path -->
+<!-- Installed to /Library/LaunchDaemons/ (loaded as root) -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.dualie.input</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@INPUT_BIN@</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/dualie-input.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/dualie-input.err</string>
+
+  <!-- Runs as root — required for IOHIDManager kIOHIDOptionsTypeSeizeDevice.
+       Accessibility permission must be granted to the binary:
+       System Settings → Privacy & Security → Accessibility → add dualie-input. -->
+</dict>
+</plist>

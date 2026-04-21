@@ -9,7 +9,7 @@
 ///
 /// Platform implementations:
 ///   linux.rs  — evdev EVIOCGRAB + uinput
-///   macos.rs  — IOHIDManager kIOHIDOptionsTypeSeizeDevice + Karabiner VirtualHIDDevice
+///   macos.rs  — IOHIDManager kIOHIDOptionsTypeSeizeDevice + CGEventPost re-injection
 
 use std::sync::{atomic::{AtomicU8, Ordering}, Arc};
 
@@ -25,8 +25,6 @@ pub mod remap;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(target_os = "macos")]
-mod macos_kvhd;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -50,14 +48,12 @@ pub fn new_active_output() -> ActiveOutput {
 /// event (macOS) so that output switches and config hot-reloads take effect
 /// immediately without any extra bookkeeping.
 pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::CompiledOutputConfig {
-    use crate::config::MachineConfig;
     let output_idx = active_output.load(Ordering::Relaxed);
-    // Resolve active port → machine config; fall back to an empty config if
-    // no machine is assigned to this port.
-    static EMPTY: std::sync::OnceLock<MachineConfig> = std::sync::OnceLock::new();
-    let empty = EMPTY.get_or_init(MachineConfig::default);
-    let machine = cfg.resolve_port(output_idx as usize).unwrap_or(empty);
-    remap::CompiledOutputConfig::from_config(machine, output_idx, 2)
+    // Resolve active port → machine config; fall back to default_machine so
+    // that `machine * { }` bindings work even without a ports block.
+    let machine = cfg.resolve_port(output_idx as usize)
+        .unwrap_or_else(|| cfg.default_machine.clone());
+    remap::CompiledOutputConfig::from_config(&machine, output_idx, 2)
 }
 
 /// Dispatch the side-effects of a `ProcessResult` — output switch, clipboard
@@ -89,13 +85,21 @@ pub fn dispatch_result(
     }
 
     if let Some(slot) = result.fire_action {
-        info!(slot, "firing virtual action");
-        let port_idx = active_output.load(Ordering::Relaxed) as usize;
-        if let Some(machine) = cfg.resolve_port(port_idx) {
-            if let Some(action) = machine.virtual_actions.get(slot as usize) {
-                crate::launch::fire(action);
+        // In dualie-input (root daemon), forward to the user daemon via the bridge.
+        // In dualie (user daemon), fire directly.
+        if serial.bridge_fire_action(slot) {
+            info!(slot, "firing virtual action: forwarded via bridge");
+        } else {
+            info!(slot, "firing virtual action: dispatching locally");
+            let port_idx = active_output.load(Ordering::Relaxed) as usize;
+            if let Some(machine) = cfg.resolve_port(port_idx) {
+                if let Some(action) = machine.virtual_actions.get(slot as usize) {
+                    crate::launch::fire(action);
+                } else {
+                    tracing::warn!(slot, "virtual action slot out of range");
+                }
             } else {
-                tracing::warn!(slot, "virtual action slot out of range");
+                tracing::warn!(slot, port_idx, "virtual action: no machine for active port");
             }
         }
     }
@@ -108,8 +112,10 @@ pub fn dispatch_result(
 /// On Linux: grabs all keyboard `/dev/input/event*` devices with `EVIOCGRAB`
 /// and writes remapped events to a uinput virtual device.
 ///
-/// On macOS: installs a CGEventTap and re-injects remapped events via the
-/// Karabiner-VirtualHIDDevice driver.  (Phase 4 — not yet implemented.)
+/// On macOS: seizes keyboards via IOHIDManager and re-injects remapped events
+/// via CGEventPost.  Runs inside `dualie-input` (root daemon) so that
+/// IOHIDManager can seize devices; action/output events bridge to `dualie`
+/// (user daemon) via the input socket.
 pub fn run(
     cfg_rx: watch::Receiver<DualieConfig>,
     serial: SerialClient,

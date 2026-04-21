@@ -14,6 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use tracing::debug;
+
 use crate::config::{
     MachineConfig,
     CAPS_ENTRY_CHORD, CAPS_ENTRY_CLIP_PULL, CAPS_ENTRY_JUMP_A, CAPS_ENTRY_JUMP_B,
@@ -139,6 +141,25 @@ impl CompiledOutputConfig {
             .filter_map(|a| a.label().map(str::to_owned))
             .collect();
 
+        tracing::info!(
+            output_index,
+            key_remaps    = out.key_remaps.len(),
+            mod_remaps    = out.modifier_remaps.len(),
+            caps_chords   = out.caps_chords.len(),
+            caps_actions  = out.caps_actions.len(),
+            caps_jumps    = out.caps_jump.len(),
+            caps_swaps    = out.caps_swap.len(),
+            unmapped_pass = out.unmapped_passthrough,
+            "compiled output config"
+        );
+        for (src, slot) in &out.caps_actions {
+            let label = out.action_labels.get(*slot as usize).map(String::as_str).unwrap_or("?");
+            tracing::info!("  caps action: {src:#04x} → slot {slot} ({label})");
+        }
+        for (src, (dst, dst_mod)) in &out.caps_chords {
+            tracing::info!("  caps chord: {src:#04x} → {dst:#04x} (mod={dst_mod:#04x})");
+        }
+
         out
     }
 }
@@ -234,6 +255,17 @@ pub fn process_key(
     // ── Caps layer active ─────────────────────────────────────────────────────
     if state.caps_held {
         match value {
+            VALUE_REPEAT => {
+                // Suppress repeats for consumed keys; pass through for unmapped.
+                if state.consumed_caps_keys.contains(&hid) {
+                    return ProcessResult::default();
+                }
+                let mapped = apply_key_remap(hid, state.modifier_bits, cfg);
+                return ProcessResult {
+                    events: vec![SyntheticKey { hid: mapped, modifiers: state.modifier_bits, value: VALUE_REPEAT }],
+                    ..Default::default()
+                };
+            }
             VALUE_UP => {
                 // If this key was consumed on the way down, suppress its up too.
                 if state.consumed_caps_keys.remove(&hid) {
@@ -248,6 +280,11 @@ pub fn process_key(
                 };
             }
             VALUE_DOWN => {
+                // On macOS, key-repeat arrives as repeated VALUE_DOWN, not VALUE_REPEAT.
+                // Suppress re-firing for already-consumed keys.
+                if state.consumed_caps_keys.contains(&hid) {
+                    return ProcessResult::default();
+                }
                 // Jump to specific output.
                 if let Some(&target) = cfg.caps_jump.get(&hid) {
                     state.consumed_caps_keys.insert(hid);
@@ -301,7 +338,7 @@ pub fn process_key(
                 }
                 return ProcessResult::default();
             }
-            _ => {} // VALUE_REPEAT — fall through to normal remap below
+            _ => {}
         }
     }
 
@@ -346,7 +383,6 @@ fn apply_key_remap(hid: u8, current_mods: u8, cfg: &CompiledOutputConfig) -> u8 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::*;
     use crate::config::{
         CapsLayer, CapsLayerEntry, KeyRemap, MachineConfig, ModifierRemap, VirtualAction,

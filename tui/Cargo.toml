@@ -30,4 +30,5 @@ directories = { version = "5" }
 anyhow = { workspace = true }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap            = { version = "4", features = ["derive"] }
+clap_complete   = { version = "4" }

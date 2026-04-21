@@ -22,17 +22,16 @@ use crate::config::kdl_config_path;
 // ── Socket path resolution ────────────────────────────────────────────────────
 
 pub fn socket_path() -> PathBuf {
-    // Prefer XDG_RUNTIME_DIR so the socket is on a tmpfs and auto-cleaned on logout.
+    // Prefer XDG_RUNTIME_DIR (Linux standard; not set on macOS by default).
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(dir).join("dualie");
         std::fs::create_dir_all(&p).ok();
         return p.join("daemon.sock");
     }
 
-    // Fallback: /tmp/dualie-<pid>/daemon.sock (unique enough for a daemon)
-    let p = PathBuf::from(format!("/tmp/dualie-{}", std::process::id()));
-    std::fs::create_dir_all(&p).ok();
-    p.join("daemon.sock")
+    // Fixed fallback — a well-known path so dua can always find us without
+    // guessing among stale /tmp/dualie-<pid> directories from past runs.
+    PathBuf::from("/tmp/dualie.sock")
 }
 
 // ── Status payload ────────────────────────────────────────────────────────────
@@ -48,16 +47,19 @@ fn status_json() -> String {
         .get()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let config_error = crate::config::last_config_error().unwrap_or_default();
 
     format!(
         "{{\"version\":{version:?},\"config\":{config:?},\"serial\":{serial:?},\
-         \"git_pending\":{git_pending},\"repo_dir\":{repo_dir:?},\"pid\":{pid}}}\n",
-        version     = env!("CARGO_PKG_VERSION"),
-        config      = kdl_config_path().display().to_string(),
-        serial      = serial,
-        git_pending = git_pending,
-        repo_dir    = repo_dir,
-        pid         = std::process::id(),
+         \"git_pending\":{git_pending},\"repo_dir\":{repo_dir:?},\
+         \"config_error\":{config_error:?},\"pid\":{pid}}}\n",
+        version      = env!("CARGO_PKG_VERSION"),
+        config       = kdl_config_path().display().to_string(),
+        serial       = serial,
+        git_pending  = git_pending,
+        repo_dir     = repo_dir,
+        config_error = config_error,
+        pid          = std::process::id(),
     )
 }
 
@@ -78,6 +80,11 @@ pub fn spawn() {
                 return;
             }
         };
+
+        // Allow any local user to connect (daemon may run as root via sudo).
+        if let Err(e) = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
+            warn!("status socket chmod: {e}");
+        }
 
         info!("status socket at {}", path.display());
 

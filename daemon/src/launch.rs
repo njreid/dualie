@@ -10,7 +10,7 @@
 /// Platform implementations:
 ///   Linux  — `gtk-launch <app_id>` (Wayland and X11); falls back to
 ///             `gio launch <path-to-desktop-file>` if gtk-launch is absent.
-///   macOS  — `open -b <bundle_id>`
+///   macOS  — NSRunningApplication + AXUIElement (no subprocesses); `open -b` only if not running
 ///   Shell  — `sh -c <command>` (both platforms)
 
 use crate::config::VirtualAction;
@@ -117,18 +117,7 @@ fn find_desktop_file(app_id: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn launch_app(app_id: &str, label: &str) {
-    // `open -b <bundle_id>` brings the app to the foreground if already running,
-    // or launches it fresh.  `-g` (background) is intentionally omitted so the
-    // app focuses immediately, which is the expected KVM shortcut behaviour.
-    if let Err(e) = std::process::Command::new("open")
-        .args(["-b", app_id])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        warn!(label, app_id, "open -b: {e}");
-    }
+    crate::launch_macos::focus_or_cycle(app_id, label);
 }
 
 // ── Unsupported platforms ─────────────────────────────────────────────────────
