@@ -1,234 +1,241 @@
 /// launch_macos.rs — Native macOS app focus and window cycling.
 ///
-/// Uses the ObjC runtime (NSRunningApplication, NSWorkspace) and the
-/// Accessibility API (AXUIElement) directly — no subprocesses.
+/// Entirely thread-safe: uses AX APIs, CoreFoundation, and proc_pidpath.
+/// No AppKit, no subprocesses (except `open -b` to launch a not-yet-running app).
 ///
-/// # Focus / launch flow
+/// # Focus / cycle flow
 ///
-/// 1. Query `NSRunningApplication.runningApplicationsWithBundleIdentifier:`
-///    to find all PIDs for the target bundle.
-/// 2. If none found: fall back to `open -b <id>` to launch.
-/// 3. If the app is already frontmost: cycle to the next window via AX.
-/// 4. Otherwise: activate via `NSRunningApplication.activateWithOptions:`.
+/// 1. Get the frontmost app's PID via AXUIElement (system-wide, thread-safe).
+/// 2. Resolve that PID to a bundle ID via proc_pidpath + CFBundle.
+/// 3. If it matches the target: cycle windows via AXRaise on window[1].
+/// 4. If not: spawn `open -b <id>` to focus or launch.
 
 use std::ffi::{c_void, CStr, CString};
+use std::path::Path;
 use tracing::warn;
 
-// ── ObjC runtime types ────────────────────────────────────────────────────────
+// ── libc ──────────────────────────────────────────────────────────────────────
 
-type Id     = *mut c_void;
-type Class  = *mut c_void;
-type Sel    = *mut c_void;
-type BOOL   = i8;
-type NSUInteger = usize;
+use libc::{pid_t, proc_pidpath, PROC_PIDPATHINFO_MAXSIZE};
 
-const YES: BOOL = 1;
-const NO:  BOOL = 0;
+// ── CoreFoundation types ─────────────────────────────────────────────────────
 
-#[link(name = "objc", kind = "dylib")]
+type CFAllocatorRef = *mut c_void;
+type CFStringRef    = *const c_void;
+type CFURLRef       = *mut c_void;
+type CFBundleRef    = *mut c_void;
+type CFTypeRef      = *mut c_void;
+type CFArrayRef     = *mut c_void;
+type CFIndex        = isize;
+type Boolean        = u8;
+
+const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+
+#[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn objc_getClass(name: *const i8) -> Class;
-    fn sel_registerName(name: *const i8) -> Sel;
-    fn objc_msgSend(receiver: Id, op: Sel, ...) -> Id;
+    static kCFAllocatorDefault: CFAllocatorRef;
+
+    fn CFStringCreateWithCString(
+        alloc: CFAllocatorRef,
+        c_str: *const i8,
+        encoding: u32,
+    ) -> CFStringRef;
+    fn CFStringGetCString(
+        s: CFStringRef,
+        buf: *mut i8,
+        buf_size: CFIndex,
+        encoding: u32,
+    ) -> Boolean;
+    fn CFRelease(cf: *mut c_void);
+
+    fn CFURLCreateFromFileSystemRepresentation(
+        alloc: CFAllocatorRef,
+        bytes: *const u8,
+        length: CFIndex,
+        is_directory: Boolean,
+    ) -> CFURLRef;
+
+    fn CFBundleCreate(alloc: CFAllocatorRef, bundle_url: CFURLRef) -> CFBundleRef;
+    fn CFBundleGetValueForInfoDictionaryKey(bundle: CFBundleRef, key: CFStringRef) -> CFTypeRef;
+
+    fn CFArrayGetCount(arr: CFArrayRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(arr: CFArrayRef, idx: CFIndex) -> *const c_void;
 }
 
-// ── CoreFoundation / AX types ────────────────────────────────────────────────
+// ── Accessibility types ───────────────────────────────────────────────────────
 
 type AXUIElementRef = *mut c_void;
 type AXError        = i32;
-type CFArrayRef     = *mut c_void;
-type CFStringRef    = *const c_void;
-type CFIndex        = isize;
-type CFAllocatorRef = *mut c_void;
-type pid_t          = i32;
-
 const kAXErrorSuccess: AXError = 0;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     fn AXUIElementCreateApplication(pid: pid_t) -> AXUIElementRef;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
         value: *mut *mut c_void,
     ) -> AXError;
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut pid_t) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
-    fn CFRelease(cf: *mut c_void);
-    fn CFArrayGetCount(arr: CFArrayRef) -> CFIndex;
-    fn CFArrayGetValueAtIndex(arr: CFArrayRef, idx: CFIndex) -> *const c_void;
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
-    static kCFAllocatorDefault: CFAllocatorRef;
-    fn CFStringCreateWithCStringNoCopy(
-        alloc: CFAllocatorRef,
-        c_str: *const i8,
-        encoding: u32,
-        contents_deallocator: CFAllocatorRef,
-    ) -> CFStringRef;
-    fn CFStringGetCString(
-        the_string: CFStringRef,
-        buffer: *mut i8,
-        buffer_size: CFIndex,
-        encoding: u32,
-    ) -> BOOL;
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-// kCFAllocatorNull — CF does not free the C string we pass in.
-// We use a null pointer to mean kCFAllocatorNull (documented as 0).
-const CF_ALLOCATOR_NULL: CFAllocatorRef = std::ptr::null_mut();
-
-// NSApplicationActivateIgnoringOtherApps
-const NS_APPLICATION_ACTIVATE_IGNORING_OTHER_APPS: NSUInteger = 1 << 1;
-
-// ── Helper: CFString from &str ───────────────────────────────────────────────
-
-/// Wrap a static C string as a CFStringRef without allocation.
-/// Caller must ensure the CString lives long enough.
-unsafe fn cf_str(s: &CStr) -> CFStringRef {
-    CFStringCreateWithCStringNoCopy(
-        CF_ALLOCATOR_NULL,
-        s.as_ptr(),
-        kCFStringEncodingUTF8,
-        CF_ALLOCATOR_NULL, // kCFAllocatorNull — don't free the buffer
-    )
-}
-
-// ── ObjC helpers ─────────────────────────────────────────────────────────────
-
-macro_rules! sel {
-    ($name:expr) => {{
-        let c = CString::new($name).unwrap();
-        unsafe { sel_registerName(c.as_ptr()) }
-    }};
-}
-
-macro_rules! cls {
-    ($name:expr) => {{
-        let c = CString::new($name).unwrap();
-        unsafe { objc_getClass(c.as_ptr()) }
-    }};
-}
-
-/// `[NSString stringWithUTF8String: s]` — no-alloc wrapper lives only as long as caller.
-unsafe fn ns_string(s: &str) -> Id {
+unsafe fn cf_string(s: &str) -> CFStringRef {
     let c = CString::new(s).unwrap_or_default();
-    objc_msgSend(
-        cls!("NSString") as Id,
-        sel!("stringWithUTF8String:"),
-        c.as_ptr() as *const i8,
-    )
+    CFStringCreateWithCString(kCFAllocatorDefault, c.as_ptr(), kCFStringEncodingUTF8)
 }
 
-/// Extract a Rust String from an NSString.
-unsafe fn rust_string(ns: Id) -> Option<String> {
-    if ns.is_null() { return None; }
-    let utf8: *const i8 = objc_msgSend(ns, sel!("UTF8String")) as *const i8;
-    if utf8.is_null() { return None; }
-    Some(CStr::from_ptr(utf8).to_string_lossy().into_owned())
+unsafe fn cf_string_to_rust(s: CFStringRef) -> Option<String> {
+    if s.is_null() { return None; }
+    let mut buf = vec![0i8; 512];
+    let ok = CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as CFIndex, kCFStringEncodingUTF8);
+    if ok == 0 { return None; }
+    Some(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+}
+
+// ── Bundle ID from PID ────────────────────────────────────────────────────────
+
+/// Resolve a PID to its bundle identifier using proc_pidpath + CFBundle.
+/// Returns None if the process isn't a bundled app or the lookup fails.
+fn bundle_id_for_pid(pid: pid_t) -> Option<String> {
+    // Get the executable path.
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE as usize];
+    let ret = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
+    if ret <= 0 { return None; }
+    let exe_path = unsafe { CStr::from_ptr(buf.as_ptr() as *const i8) }
+        .to_string_lossy()
+        .into_owned();
+
+    // Walk up the path to find the enclosing .app bundle.
+    let bundle_path = {
+        let mut p: &Path = Path::new(&exe_path);
+        loop {
+            if p.extension().and_then(|e| e.to_str()) == Some("app") {
+                break Some(p);
+            }
+            match p.parent() {
+                Some(parent) if parent != p => p = parent,
+                _ => break None,
+            }
+        }
+    }?;
+
+    // Read CFBundleIdentifier from the bundle's Info.plist via CFBundle.
+    let path_bytes = bundle_path.as_os_str().as_encoded_bytes();
+    unsafe {
+        let url = CFURLCreateFromFileSystemRepresentation(
+            kCFAllocatorDefault,
+            path_bytes.as_ptr(),
+            path_bytes.len() as CFIndex,
+            1, // is_directory = true
+        );
+        if url.is_null() { return None; }
+
+        let bundle = CFBundleCreate(kCFAllocatorDefault, url);
+        CFRelease(url);
+        if bundle.is_null() { return None; }
+
+        let key = cf_string("CFBundleIdentifier");
+        let val = CFBundleGetValueForInfoDictionaryKey(bundle, key);
+        CFRelease(key as *mut c_void);
+        CFRelease(bundle);
+
+        if val.is_null() { return None; }
+        cf_string_to_rust(val as CFStringRef)
+    }
+}
+
+// ── Frontmost PID via AX ──────────────────────────────────────────────────────
+
+/// Returns the PID of the currently frontmost application.
+fn frontmost_pid() -> Option<pid_t> {
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() { return None; }
+
+        let attr = cf_string("AXFocusedApplication");
+        let mut focused: *mut c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(system, attr, &mut focused);
+        CFRelease(attr as *mut c_void);
+        CFRelease(system);
+
+        if err != kAXErrorSuccess || focused.is_null() { return None; }
+
+        let mut pid: pid_t = 0;
+        let err = AXUIElementGetPid(focused as AXUIElementRef, &mut pid);
+        CFRelease(focused);
+
+        if err != kAXErrorSuccess { None } else { Some(pid) }
+    }
+}
+
+// ── Window cycling ────────────────────────────────────────────────────────────
+
+/// Raise window[1] of the given PID, cycling it to the front.
+/// No-op if the app has fewer than two windows.
+fn cycle_window(pid: pid_t, label: &str) {
+    unsafe {
+        let ax_app = AXUIElementCreateApplication(pid);
+        if ax_app.is_null() { return; }
+
+        let attr = cf_string("AXWindows");
+        let mut windows_val: *mut c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(ax_app, attr, &mut windows_val);
+        CFRelease(attr as *mut c_void);
+
+        if err != kAXErrorSuccess || windows_val.is_null() {
+            CFRelease(ax_app);
+            return;
+        }
+
+        let windows = windows_val as CFArrayRef;
+        if CFArrayGetCount(windows) > 1 {
+            let win1 = CFArrayGetValueAtIndex(windows, 1) as AXUIElementRef;
+            let action = cf_string("AXRaise");
+            let err = AXUIElementPerformAction(win1, action);
+            CFRelease(action as *mut c_void);
+            if err != kAXErrorSuccess {
+                warn!(label, pid, err, "AXRaise failed");
+            }
+        }
+
+        CFRelease(windows_val);
+        CFRelease(ax_app);
+    }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Focus or launch an app by bundle ID.
-/// If the app is already frontmost, cycle to its next window instead.
+/// Focus or launch an app by bundle ID. Cycles windows if already frontmost.
+/// Safe to call from any thread.
 pub fn focus_or_cycle(app_id: &str, label: &str) {
-    unsafe { focus_or_cycle_inner(app_id, label) }
-}
+    // Check if the target app is currently frontmost.
+    let already_front = frontmost_pid()
+        .and_then(|pid| bundle_id_for_pid(pid).map(|id| (pid, id)))
+        .map(|(pid, id)| {
+            if id == app_id {
+                // Already front — cycle windows.
+                cycle_window(pid, label);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
 
-unsafe fn focus_or_cycle_inner(app_id: &str, label: &str) {
-    // ── Find running instances ────────────────────────────────────────────────
-    let ns_bundle_id = ns_string(app_id);
-    let running_apps: Id = objc_msgSend(
-        cls!("NSRunningApplication") as Id,
-        sel!("runningApplicationsWithBundleIdentifier:"),
-        ns_bundle_id,
-    );
-
-    let count: NSUInteger =
-        objc_msgSend(running_apps, sel!("count")) as usize;
-
-    if count == 0 {
-        // Not running — launch via open(1).
-        launch_via_open(app_id, label);
-        return;
-    }
-
-    // ── Check frontmost app ───────────────────────────────────────────────────
-    let workspace: Id = objc_msgSend(
-        cls!("NSWorkspace") as Id,
-        sel!("sharedWorkspace"),
-    );
-    let frontmost: Id = objc_msgSend(workspace, sel!("frontmostApplication"));
-    let front_bundle: Id = objc_msgSend(frontmost, sel!("bundleIdentifier"));
-    let front_id = rust_string(front_bundle).unwrap_or_default();
-
-    let already_front = front_id == app_id;
-
-    // ── Get PID of the first running instance ─────────────────────────────────
-    let app_instance: Id = objc_msgSend(running_apps, sel!("firstObject"));
-    let pid: pid_t = objc_msgSend(app_instance, sel!("processIdentifier")) as pid_t;
-
-    if already_front {
-        // Cycle to next window via AX.
-        cycle_window(pid, label);
-    } else {
-        // Activate the app.
-        objc_msgSend(
-            app_instance,
-            sel!("activateWithOptions:"),
-            NS_APPLICATION_ACTIVATE_IGNORING_OTHER_APPS,
-        );
-    }
-}
-
-/// Raise the second window of the process (cycling the front window to back).
-/// No-op if the app has zero or one windows.
-unsafe fn cycle_window(pid: pid_t, label: &str) {
-    let ax_app = AXUIElementCreateApplication(pid);
-    if ax_app.is_null() { return; }
-
-    // kAXWindowsAttribute
-    let attr_cstr = CString::new("AXWindows").unwrap();
-    let attr_cf = cf_str(&attr_cstr);
-    let mut windows_val: *mut c_void = std::ptr::null_mut();
-    let err = AXUIElementCopyAttributeValue(ax_app, attr_cf, &mut windows_val);
-    CFRelease(attr_cf as *mut c_void);
-
-    if err != kAXErrorSuccess || windows_val.is_null() {
-        CFRelease(ax_app);
-        return;
-    }
-
-    let windows = windows_val as CFArrayRef;
-    let n = CFArrayGetCount(windows);
-
-    if n > 1 {
-        // Raise window[1] — it becomes front, window[0] moves to back.
-        let win1 = CFArrayGetValueAtIndex(windows, 1) as AXUIElementRef;
-        let action_cstr = CString::new("AXRaise").unwrap();
-        let action_cf = cf_str(&action_cstr);
-        let err = AXUIElementPerformAction(win1 as AXUIElementRef, action_cf);
-        CFRelease(action_cf as *mut c_void);
-        if err != kAXErrorSuccess {
-            warn!(label, pid, err, "AXRaise failed");
+    if !already_front {
+        // Focus if running, or launch if not. `open -b` handles both.
+        if let Err(e) = std::process::Command::new("open")
+            .args(["-b", app_id])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            warn!(label, app_id, "open -b: {e}");
         }
-    }
-
-    CFRelease(windows_val);
-    CFRelease(ax_app);
-}
-
-fn launch_via_open(app_id: &str, label: &str) {
-    if let Err(e) = std::process::Command::new("open")
-        .args(["-b", app_id])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        warn!(label, app_id, "open -b: {e}");
     }
 }
