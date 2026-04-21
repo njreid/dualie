@@ -59,14 +59,17 @@ instructions.
 just install
 ```
 
-Builds and installs two binaries to `~/.local/bin/`:
+Builds and installs binaries and service definitions.  Does **not** start anything — run `just rerun` afterwards.
 
-| Binary | Purpose |
-|--------|---------|
-| `dualie` | Background daemon — runs as a systemd user service (Linux) or launchd agent (macOS) |
-| `dua` | CLI and TUI client |
+| Binary | Runs as | Purpose |
+|--------|---------|---------|
+| `dualie` | current user | User daemon — config, serial peer, file sync, git, action dispatch |
+| `dualie-input` | root | Root input daemon — seizes keyboards via IOHIDManager (macOS) or evdev (Linux) |
+| `dua` | current user | CLI and TUI client |
 
-On Linux, also installs a udev rule so the daemon can grab `/dev/input/` devices without root.
+On macOS, `dualie-input` must be added to **System Settings → Privacy & Security → Accessibility** before it can seize keyboard devices.
+
+On Linux, a udev rule is installed so the input daemon can grab `/dev/input/` devices without root.
 
 ---
 
@@ -81,7 +84,7 @@ dua push         # push config to git remote
 
 The TUI has five tabs (switch with Tab / number keys):
 
-**Status** · **Remaps** · **Caps Layer** · **Config** · **Sync**
+**Status** · **Remaps** · **Layers** · **Actions** · **Sync**
 
 Press `p` to pull, `u` to push from any tab. Press `q` to quit.
 
@@ -231,14 +234,25 @@ UART. No physical access to the far machine required.
 
 ---
 
+## Daemon management
+
+```shell
+just install   # build + install binaries and service plists (does not start)
+just rerun     # (re)start both daemons — root input daemon then user daemon
+just stop      # stop both daemons and disable automatic restart
+just uninstall # stop, unload, and remove all installed files
+```
+
 ## Project layout
 
 ```
-daemon/          Rust daemon (key remap, serial peer, config sync, git versioning)
-proto/           Shared message types (DualieMessage — CBOR over COBS)
+daemon/          Rust daemons
+  src/main.rs        dualie  — user daemon (config, serial, actions, file sync)
+  src/bin/dualie_input.rs    dualie-input — root daemon (keyboard seizure)
+proto/           Shared types: DualieMessage (CBOR/COBS) + input bridge protocol
 tui/             dua CLI/TUI client
 src/             RP2040 firmware (C, TinyUSB)
-resources/       systemd service + launchd plist
+resources/       systemd service + launchd plists
 homebrew/        Homebrew formula
 ```
 

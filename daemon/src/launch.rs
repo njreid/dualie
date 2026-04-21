@@ -117,42 +117,55 @@ fn find_desktop_file(app_id: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn launch_app(app_id: &str, label: &str) {
-    // If the app is already frontmost, cycle to its next window.
-    // Otherwise bring it to the foreground (or launch it fresh).
-    //
-    // The AppleScript checks whether the frontmost process has the target
-    // bundle ID.  If so, it rotates the window list so the second window
-    // becomes first (i.e. the old front window moves to the back).  If not,
-    // it falls through to `open -b` to focus/launch normally.
-    let script = format!(
-        r#"
-tell application "System Events"
-    set frontID to bundle identifier of first application process whose frontmost is true
-end tell
-if frontID is equal to "{app_id}" then
-    tell application id "{app_id}"
-        set wins to every window
-        if (count wins) > 1 then
-            set front window to item 2 of wins
-        end if
-    end tell
-else
-    do shell script "open -b '{app_id}'"
-end if
-"#
-    );
+    // Fast path: check the frontmost app via `lsappinfo front` (no interpreter
+    // startup cost).  If the target is already frontmost, cycle its windows via
+    // a JXA one-liner.  Otherwise use `open -b` to focus/launch.
+    let already_front = is_app_frontmost(app_id);
 
-    let result = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    if let Err(e) = result {
-        warn!(label, app_id, "osascript: {e}");
+    if already_front {
+        // Cycle to the next window: rotate the window list so window[1] becomes
+        // front (window[0] moves to back).  No-op if there is only one window.
+        let script = format!(
+            "var app = Application('{app_id}'); \
+             var wins = app.windows(); \
+             if (wins.length > 1) {{ app.windows[1].index = 1; }}"
+        );
+        let result = std::process::Command::new("osascript")
+            .args(["-l", "JavaScript", "-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Err(e) = result {
+            warn!(label, app_id, "osascript window cycle: {e}");
+        }
+    } else {
+        if let Err(e) = std::process::Command::new("open")
+            .args(["-b", app_id])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            warn!(label, app_id, "open -b: {e}");
+        }
     }
+}
+
+/// Returns true if the app with the given bundle ID is currently frontmost.
+/// Uses `lsappinfo front` which is a lightweight system call with no
+/// interpreter startup overhead.
+#[cfg(target_os = "macos")]
+fn is_app_frontmost(app_id: &str) -> bool {
+    let Ok(out) = std::process::Command::new("lsappinfo")
+        .args(["front"])
+        .output()
+    else {
+        return false;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // lsappinfo output contains: bundleID="com.example.App"
+    stdout.contains(&format!("bundleID=\"{app_id}\""))
 }
 
 // ── Unsupported platforms ─────────────────────────────────────────────────────

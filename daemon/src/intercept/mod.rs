@@ -9,7 +9,7 @@
 ///
 /// Platform implementations:
 ///   linux.rs  — evdev EVIOCGRAB + uinput
-///   macos.rs  — IOHIDManager kIOHIDOptionsTypeSeizeDevice + Karabiner VirtualHIDDevice
+///   macos.rs  — IOHIDManager kIOHIDOptionsTypeSeizeDevice + CGEventPost re-injection
 
 use std::sync::{atomic::{AtomicU8, Ordering}, Arc};
 
@@ -112,8 +112,10 @@ pub fn dispatch_result(
 /// On Linux: grabs all keyboard `/dev/input/event*` devices with `EVIOCGRAB`
 /// and writes remapped events to a uinput virtual device.
 ///
-/// On macOS: installs a CGEventTap and re-injects remapped events via the
-/// Karabiner-VirtualHIDDevice driver.  (Phase 4 — not yet implemented.)
+/// On macOS: seizes keyboards via IOHIDManager and re-injects remapped events
+/// via CGEventPost.  Runs inside `dualie-input` (root daemon) so that
+/// IOHIDManager can seize devices; action/output events bridge to `dualie`
+/// (user daemon) via the input socket.
 pub fn run(
     cfg_rx: watch::Receiver<DualieConfig>,
     serial: SerialClient,

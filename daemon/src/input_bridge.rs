@@ -40,7 +40,7 @@ async fn bridge_loop(
 ) {
     loop {
         match try_connect(&mut cfg_rx, &active_output, &serial).await {
-            Ok(()) => info!("input bridge: disconnected, reconnecting…"),
+            Ok(()) => info!("input bridge: disconnected, reconnecting in 2s…"),
             Err(e) => warn!("input bridge: {e}, reconnecting in 2s…"),
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -140,14 +140,14 @@ fn dispatch(
         }
         FromInput::FireAction(slot) => {
             info!("input bridge: fire action slot {slot}");
-            let cfg   = cfg_rx.borrow();
-            let port  = active_output.load(Ordering::Relaxed) as usize;
-            if let Some(machine) = cfg.resolve_port(port) {
-                if let Some(action) = machine.virtual_actions.get(slot as usize) {
-                    crate::launch::fire(action);
-                } else {
-                    warn!("input bridge: action slot {slot} out of range");
-                }
+            let cfg     = cfg_rx.borrow();
+            let port    = active_output.load(Ordering::Relaxed) as usize;
+            let machine = cfg.resolve_port(port)
+                .unwrap_or_else(|| cfg.default_machine.clone());
+            if let Some(action) = machine.virtual_actions.get(slot as usize) {
+                crate::launch::fire(action);
+            } else {
+                warn!("input bridge: action slot {slot} out of range");
             }
         }
         FromInput::ClipPull => {

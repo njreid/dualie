@@ -384,7 +384,6 @@ fn apply_key_remap(hid: u8, current_mods: u8, cfg: &CompiledOutputConfig) -> u8 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::*;
     use crate::config::{
         CapsLayer, CapsLayerEntry, KeyRemap, MachineConfig, ModifierRemap, VirtualAction,
         CAPS_ENTRY_CHORD, CAPS_ENTRY_JUMP_A, CAPS_ENTRY_JUMP_B, CAPS_ENTRY_SWAP, CAPS_ENTRY_VIRTUAL,
