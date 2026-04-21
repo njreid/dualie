@@ -83,7 +83,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Sync, Tab::Actions];
+    const ALL: &'static [Tab] = &[Tab::Status, Tab::Remaps, Tab::Layers, Tab::Actions, Tab::Sync];
 
     fn title(self) -> &'static str {
         match self {
@@ -743,6 +743,11 @@ fn cmd_status(socket_path: &str) -> Result<()> {
             if !s.repo_dir.is_empty() {
                 println!("Repo:    {}", s.repo_dir);
             }
+            if !s.config_error.is_empty() {
+                eprintln!("\nConfig parse error (daemon is running with last good config):");
+                eprintln!("{}", s.config_error);
+                std::process::exit(2);
+            }
         }
         Err(e) => {
             eprintln!("daemon unavailable: {e}");
@@ -915,10 +920,17 @@ fn list_gui_apps_linux() -> Result<Vec<(String, String)>> {
 #[cfg(target_os = "macos")]
 fn list_gui_apps_macos() -> Result<Vec<(String, String)>> {
 
-    let search_dirs = [
+    let mut search_dirs = vec![
         std::path::PathBuf::from("/Applications"),
         std::path::PathBuf::from("/System/Applications"),
     ];
+    // Chrome saved/progressive web apps install here per-user.
+    if let Some(home) = std::env::var_os("HOME") {
+        search_dirs.push(
+            std::path::Path::new(&home)
+                .join("Applications/Chrome Apps.localized"),
+        );
+    }
 
     let mut apps: Vec<(String, String)> = Vec::new();
 
@@ -1179,8 +1191,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                     (_, KeyCode::Char('1')) if !in_modal => { app.tab = Tab::Status;  app.scroll = 0; }
                     (_, KeyCode::Char('2')) if !in_modal => { app.tab = Tab::Remaps;  app.scroll = 0; }
                     (_, KeyCode::Char('3')) if !in_modal => { app.tab = Tab::Layers;  app.scroll = 0; }
-                    (_, KeyCode::Char('4')) if !in_modal => { app.tab = Tab::Sync;    app.scroll = 0; }
-                    (_, KeyCode::Char('5')) if !in_modal => { app.tab = Tab::Actions; app.scroll = 0; }
+                    (_, KeyCode::Char('4')) if !in_modal => { app.tab = Tab::Actions; app.scroll = 0; }
+                    (_, KeyCode::Char('5')) if !in_modal => { app.tab = Tab::Sync;    app.scroll = 0; }
 
                     // ── Sync tab ──────────────────────────────────────────────
                     (_, KeyCode::Down) | (_, KeyCode::Char('j'))

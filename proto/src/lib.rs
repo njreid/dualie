@@ -1,3 +1,4 @@
+pub mod input_proto;
 pub mod paths;
 pub mod protocol;
 pub mod serial;

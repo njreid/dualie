@@ -147,6 +147,21 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
             ]),
         ];
 
+        // Config parse error — shown prominently when present.
+        if !st.config_error.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  ✗ Config parse error:",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+            for line in st.config_error.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {line}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+
         // Git status row.
         if !st.repo_dir.is_empty() {
             lines.push(Line::from(vec![

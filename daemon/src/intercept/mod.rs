@@ -26,8 +26,6 @@ pub mod remap;
 mod linux;
 
 #[cfg(target_os = "macos")]
-mod macos_kvhd;
-#[cfg(target_os = "macos")]
 mod macos;
 
 // ── Shared active-output state ────────────────────────────────────────────────
@@ -51,9 +49,10 @@ pub fn new_active_output() -> ActiveOutput {
 /// immediately without any extra bookkeeping.
 pub fn recompile(cfg: &DualieConfig, active_output: &ActiveOutput) -> remap::CompiledOutputConfig {
     let output_idx = active_output.load(Ordering::Relaxed);
-    // Resolve active port → machine config; fall back to an empty config if
-    // no machine is assigned to this port.
-    let machine = cfg.resolve_port(output_idx as usize).unwrap_or_default();
+    // Resolve active port → machine config; fall back to default_machine so
+    // that `machine * { }` bindings work even without a ports block.
+    let machine = cfg.resolve_port(output_idx as usize)
+        .unwrap_or_else(|| cfg.default_machine.clone());
     remap::CompiledOutputConfig::from_config(&machine, output_idx, 2)
 }
 
@@ -86,13 +85,21 @@ pub fn dispatch_result(
     }
 
     if let Some(slot) = result.fire_action {
-        info!(slot, "firing virtual action");
-        let port_idx = active_output.load(Ordering::Relaxed) as usize;
-        if let Some(machine) = cfg.resolve_port(port_idx) {
-            if let Some(action) = machine.virtual_actions.get(slot as usize) {
-                crate::launch::fire(action);
+        // In dualie-input (root daemon), forward to the user daemon via the bridge.
+        // In dualie (user daemon), fire directly.
+        if serial.bridge_fire_action(slot) {
+            info!(slot, "firing virtual action: forwarded via bridge");
+        } else {
+            info!(slot, "firing virtual action: dispatching locally");
+            let port_idx = active_output.load(Ordering::Relaxed) as usize;
+            if let Some(machine) = cfg.resolve_port(port_idx) {
+                if let Some(action) = machine.virtual_actions.get(slot as usize) {
+                    crate::launch::fire(action);
+                } else {
+                    tracing::warn!(slot, "virtual action slot out of range");
+                }
             } else {
-                tracing::warn!(slot, "virtual action slot out of range");
+                tracing::warn!(slot, port_idx, "virtual action: no machine for active port");
             }
         }
     }

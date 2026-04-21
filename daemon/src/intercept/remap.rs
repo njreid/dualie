@@ -141,7 +141,7 @@ impl CompiledOutputConfig {
             .filter_map(|a| a.label().map(str::to_owned))
             .collect();
 
-        debug!(
+        tracing::info!(
             output_index,
             key_remaps    = out.key_remaps.len(),
             mod_remaps    = out.modifier_remaps.len(),
@@ -152,27 +152,12 @@ impl CompiledOutputConfig {
             unmapped_pass = out.unmapped_passthrough,
             "compiled output config"
         );
-        for (src, (dst, req_mod)) in &out.key_remaps {
-            debug!("  key remap: {src:#04x} → {dst:#04x} (req_mod={req_mod:#04x})");
-        }
-        for (src, dst) in &out.modifier_remaps {
-            debug!("  mod remap: {src:#04x} → {dst:#04x}");
-        }
-        for (src, (dst, dst_mod)) in &out.caps_chords {
-            debug!("  caps chord: {src:#04x} → {dst:#04x} (mod={dst_mod:#04x})");
-        }
         for (src, slot) in &out.caps_actions {
             let label = out.action_labels.get(*slot as usize).map(String::as_str).unwrap_or("?");
-            debug!("  caps action: {src:#04x} → slot {slot} ({label})");
+            tracing::info!("  caps action: {src:#04x} → slot {slot} ({label})");
         }
-        for (src, target) in &out.caps_jump {
-            debug!("  caps jump: {src:#04x} → output {target}");
-        }
-        for src in &out.caps_swap {
-            debug!("  caps swap: {src:#04x}");
-        }
-        for src in &out.caps_clip_pull {
-            debug!("  caps clip-pull: {src:#04x}");
+        for (src, (dst, dst_mod)) in &out.caps_chords {
+            tracing::info!("  caps chord: {src:#04x} → {dst:#04x} (mod={dst_mod:#04x})");
         }
 
         out

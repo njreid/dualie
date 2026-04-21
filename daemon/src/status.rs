@@ -47,16 +47,19 @@ fn status_json() -> String {
         .get()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let config_error = crate::config::last_config_error().unwrap_or_default();
 
     format!(
         "{{\"version\":{version:?},\"config\":{config:?},\"serial\":{serial:?},\
-         \"git_pending\":{git_pending},\"repo_dir\":{repo_dir:?},\"pid\":{pid}}}\n",
-        version     = env!("CARGO_PKG_VERSION"),
-        config      = kdl_config_path().display().to_string(),
-        serial      = serial,
-        git_pending = git_pending,
-        repo_dir    = repo_dir,
-        pid         = std::process::id(),
+         \"git_pending\":{git_pending},\"repo_dir\":{repo_dir:?},\
+         \"config_error\":{config_error:?},\"pid\":{pid}}}\n",
+        version      = env!("CARGO_PKG_VERSION"),
+        config       = kdl_config_path().display().to_string(),
+        serial       = serial,
+        git_pending  = git_pending,
+        repo_dir     = repo_dir,
+        config_error = config_error,
+        pid          = std::process::id(),
     )
 }
 

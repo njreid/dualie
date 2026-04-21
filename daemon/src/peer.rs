@@ -77,6 +77,17 @@ impl SerialClient {
         *self.inner.lock().await = tx;
     }
 
+    /// If an event bridge is configured, forward a `FireAction` event to the user
+    /// daemon and return `true`.  Returns `false` when no bridge is set (the
+    /// caller should fire the action locally instead).
+    pub fn bridge_fire_action(&self, slot: u8) -> bool {
+        if let Some(bridge) = &self.event_bridge {
+            let _ = bridge.lock().unwrap().send(FromInput::FireAction(slot));
+            return true;
+        }
+        false
+    }
+
     /// Send a message to the RP2040.  Silently drops if disconnected or queue full.
     /// When an event bridge is set, translates relevant messages to `FromInput`.
     pub async fn send(&self, msg: DualieMessage) {

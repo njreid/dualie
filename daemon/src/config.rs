@@ -4,6 +4,15 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Last config parse error, if any. Cleared on successful reload.
+/// Read by status.rs to surface the error in `dua status` and the TUI.
+static LAST_CONFIG_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn last_config_error() -> Option<String> {
+    LAST_CONFIG_ERROR.lock().unwrap().clone()
+}
 
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -722,7 +731,15 @@ impl DualieConfig {
             tracing::info!("created default config at {}", path.display());
         }
 
-        let initial = Self::load_or_default()?;
+        let initial = match Self::load_or_default() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                tracing::error!("config load: {msg}");
+                *LAST_CONFIG_ERROR.lock().unwrap() = Some(msg);
+                Self::default()
+            }
+        };
         let (tx, rx) = tokio::sync::watch::channel(initial);
 
         tokio::task::spawn_blocking(move || {
@@ -733,6 +750,9 @@ impl DualieConfig {
                 Err(e) => { tracing::error!("config watcher: {e}"); return; }
             };
 
+            // Watch the parent directory — editors (vim, neovim, helix) atomically
+            // replace files via rename, which generates a Create event on the new
+            // inode rather than a Modify on the old one.
             let watch_dir = path.parent().unwrap_or(&path);
             if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
                 tracing::error!("watch {}: {e}", watch_dir.display());
@@ -747,16 +767,20 @@ impl DualieConfig {
                         if !event.paths.iter().any(|p| p == &path) { continue; }
                         if matches!(event.kind,
                             notify::EventKind::Create(_) |
-                            notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) |
-                            notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                            notify::EventKind::Modify(_))
                         {
                             match Self::load_or_default() {
                                 Ok(cfg) => {
+                                    *LAST_CONFIG_ERROR.lock().unwrap() = None;
                                     tracing::info!("config reloaded");
                                     let _ = tx.send(cfg);
                                     crate::git_sync::trigger_commit();
                                 }
-                                Err(e) => tracing::error!("config reload: {e:#}"),
+                                Err(e) => {
+                                    let msg = format!("{e:#}");
+                                    tracing::error!("config reload: {msg}");
+                                    *LAST_CONFIG_ERROR.lock().unwrap() = Some(msg);
+                                }
                             }
                         }
                     }

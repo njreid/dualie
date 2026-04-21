@@ -173,6 +173,27 @@ rerun:
         echo "✓ Done."
     fi
 
+# Stop both daemons and disable automatic restart (inverse of rerun).
+stop:
+    #!/usr/bin/env bash
+    set -e
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "→ Stopping user daemon (dualie)…"
+        launchctl unload "${HOME}/Library/LaunchAgents/dev.dualie.plist" 2>/dev/null || true
+        pkill -x dualie 2>/dev/null || true
+
+        echo "→ Stopping root input daemon (dualie-input)…"
+        sudo launchctl unload /Library/LaunchDaemons/dev.dualie.input.plist 2>/dev/null || true
+        sudo pkill -x dualie-input 2>/dev/null || true
+
+        echo "✓ Both daemons stopped. Run 'just rerun' to start again."
+    else
+        echo "→ Stopping dualie systemd service…"
+        systemctl --user stop dualie.service 2>/dev/null || true
+        systemctl --user disable dualie.service 2>/dev/null || true
+        echo "✓ Stopped and disabled. Run 'just rerun' to start again."
+    fi
+
 # Uninstall binaries and service definitions (stops running daemons first).
 uninstall:
     #!/usr/bin/env bash

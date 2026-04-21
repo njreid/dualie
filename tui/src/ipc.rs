@@ -10,12 +10,13 @@ use anyhow::{Context, Result};
 
 #[derive(Debug, Clone)]
 pub struct DaemonStatus {
-    pub version:     String,
-    pub config:      String,
-    pub serial:      String,   // "connected" | "disconnected"
-    pub git_pending: u32,
-    pub repo_dir:    String,
-    pub pid:         u64,
+    pub version:      String,
+    pub config:       String,
+    pub serial:       String,   // "connected" | "disconnected"
+    pub git_pending:  u32,
+    pub repo_dir:     String,
+    pub config_error: String,   // non-empty when the last config parse failed
+    pub pid:          u64,
 }
 
 /// Connect to the socket, read the JSON line, return parsed status.
@@ -52,12 +53,13 @@ fn parse_status_json(s: &str) -> Result<DaemonStatus> {
     }
 
     Ok(DaemonStatus {
-        version:     extract(s, "version").unwrap_or("?").to_owned(),
-        config:      extract(s, "config").unwrap_or("?").to_owned(),
-        serial:      extract(s, "serial").unwrap_or("disconnected").to_owned(),
-        git_pending: extract(s, "git_pending").unwrap_or("0").parse().unwrap_or(0),
-        repo_dir:    extract(s, "repo_dir").unwrap_or("").to_owned(),
-        pid:         extract(s, "pid").unwrap_or("0").parse().unwrap_or(0),
+        version:      extract(s, "version").unwrap_or("?").to_owned(),
+        config:       extract(s, "config").unwrap_or("?").to_owned(),
+        serial:       extract(s, "serial").unwrap_or("disconnected").to_owned(),
+        git_pending:  extract(s, "git_pending").unwrap_or("0").parse().unwrap_or(0),
+        repo_dir:     extract(s, "repo_dir").unwrap_or("").to_owned(),
+        config_error: extract(s, "config_error").unwrap_or("").to_owned(),
+        pid:          extract(s, "pid").unwrap_or("0").parse().unwrap_or(0),
     })
 }
 
@@ -67,12 +69,20 @@ mod tests {
 
     #[test]
     fn parse_status() {
-        let s = r#"{"version":"0.1.0","config":"/home/user/.config/dualie/dualie.kdl","serial":"connected","git_pending":0,"repo_dir":"","pid":1234}"#;
+        let s = r#"{"version":"0.1.0","config":"/home/user/.config/dualie/dualie.kdl","serial":"connected","git_pending":0,"repo_dir":"","config_error":"","pid":1234}"#;
         let st = parse_status_json(s).unwrap();
         assert_eq!(st.version, "0.1.0");
         assert_eq!(st.serial, "connected");
         assert_eq!(st.pid, 1234);
         assert_eq!(st.git_pending, 0);
+        assert_eq!(st.config_error, "");
+    }
+
+    #[test]
+    fn parse_config_error() {
+        let s = r#"{"version":"0.2.0","config":"/tmp/x.kdl","serial":"connected","git_pending":0,"repo_dir":"","config_error":"parsing /tmp/x.kdl: unknown machine node: foo","pid":42}"#;
+        let st = parse_status_json(s).unwrap();
+        assert_eq!(st.config_error, "parsing /tmp/x.kdl: unknown machine node: foo");
     }
 
     #[test]
