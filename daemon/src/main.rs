@@ -10,6 +10,8 @@ mod git_sync;
 mod input_bridge;
 mod intercept;
 mod launch;
+#[cfg(target_os = "macos")]
+mod launch_macos;
 mod peer;
 mod serialize;
 mod status;

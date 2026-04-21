@@ -7,6 +7,8 @@ pub mod git_sync;
 pub mod input_bridge;
 pub mod intercept;
 pub mod launch;
+#[cfg(target_os = "macos")]
+pub mod launch_macos;
 pub mod peer;
 pub mod serialize;
 pub mod status;
