@@ -1,0 +1,28 @@
+[package]
+name        = "capshift"
+version     = "0.1.0"
+edition     = "2021"
+description = "Caps-lock chord shortcut daemon for macOS — app launch/focus and key remaps"
+license     = "GPL-3.0"
+
+[[bin]]
+name = "capshift"
+path = "src/main.rs"
+
+[dependencies]
+tokio  = { workspace = true }
+anyhow = { workspace = true }
+
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+clap = { version = "4", features = ["derive"] }
+kdl  = { version = "6" }
+
+# File watcher for config hot-reload (macos_kqueue kept for parity with the
+# daemon crate's own dependency spec; the Linux inotify backend used for
+# local `cargo test` runs is unaffected by this feature selection).
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+
+[dev-dependencies]
+tokio-test = { version = "0.4" }
