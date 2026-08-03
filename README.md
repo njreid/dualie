@@ -87,6 +87,49 @@ Press `p` to pull, `u` to push from any tab. Press `q` to quit.
 
 ---
 
+## capshift
+
+`capshift` is a separate, independent binary in this workspace: a minimal
+macOS-only daemon that turns Caps Lock into a chord modifier. It shares no
+runtime state with the `dualie` KVM daemon — no RP2040, no multi-machine
+sync — just caps+key shortcuts on one MacBook.
+
+- caps+`<key>` bound to `app=` → focus/launch that app (`open -b <bundle-id>`)
+- caps+`<key>` bound to `shell=` → run a shell command
+- caps+`<key>` bound to `key=` → remap to a different key (e.g. caps+h/j/k/l → arrow keys)
+
+### Install
+
+```
+brew tap dualie-dev/dualie
+brew install capshift
+brew services start capshift
+```
+
+Requires:
+- Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
+- [Karabiner-Elements](https://karabiner-elements.pqrs.org/) installed and running (provides the virtual keyboard driver capshift injects keystrokes through)
+
+### Config
+
+Edit `~/.config/capshift/config.kdl` (created automatically on first run with commented-out examples):
+
+```kdl
+bind "s" app="com.tinyspeck.slackmacgap" label="Slack"
+bind "m" app="com.apple.mail" label="Mail"
+bind "t" shell="open -a Terminal" label="Terminal"
+
+// caps+h/j/k/l as arrow keys
+bind "h" key="left"
+bind "j" key="down"
+bind "k" key="up"
+bind "l" key="right"
+```
+
+Changes are picked up automatically — no restart needed.
+
+---
+
 ## Config
 
 Config lives at `~/.config/dualie/dualie.kdl` and is created automatically
