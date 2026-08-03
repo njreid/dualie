@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod actions;
 mod chord;
 mod keycodes;
 
