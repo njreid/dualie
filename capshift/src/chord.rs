@@ -64,6 +64,13 @@ impl ChordState {
         }
     }
 
+    /// Update the binding table in place, preserving in-flight chord state
+    /// (active/remapped/fired) so a config reload never loses track of a
+    /// physical key the user is still holding down mid-chord.
+    pub fn set_bindings(&mut self, bindings: HashMap<u8, Binding>) {
+        self.bindings = bindings;
+    }
+
     /// Process one HID key event.
     ///
     /// `hid`  — HID keycode (Usage Page 0x07) of the key.
@@ -178,5 +185,20 @@ mod tests {
         chord.process(CAPS, true);
         assert_eq!(chord.process(X, true), KeyOutcome::Passthrough);
         assert_eq!(chord.process(X, false), KeyOutcome::Passthrough);
+    }
+
+    #[test]
+    fn set_bindings_does_not_disrupt_in_flight_remap() {
+        let mut chord = ChordState::new(CAPS, bindings());
+        chord.process(CAPS, true);
+        assert_eq!(chord.process(H, true), KeyOutcome::Forward(LEFT));
+
+        // Config reloads mid-chord with a completely different binding table
+        // (H is no longer bound to anything).
+        chord.set_bindings(HashMap::new());
+
+        // The key-up for H must still translate to LEFT — the physical key
+        // is still "in flight" from before the reload.
+        assert_eq!(chord.process(H, false), KeyOutcome::Forward(LEFT));
     }
 }

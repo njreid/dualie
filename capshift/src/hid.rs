@@ -146,7 +146,7 @@ unsafe extern "C" fn value_available(
 
         if state.cfg_rx.has_changed().unwrap_or(false) {
             let bindings = state.cfg_rx.borrow_and_update().clone();
-            state.chord = ChordState::new(CAPS_LOCK_HID, bindings);
+            state.chord.set_bindings(bindings);
         }
 
         let modifier_bit = hid_modifier_bit(usage);
