@@ -4,6 +4,8 @@ use clap::Parser;
 mod actions;
 mod chord;
 mod config;
+#[cfg(target_os = "macos")]
+mod hid;
 mod keycodes;
 #[cfg(target_os = "macos")]
 mod kvhd;
