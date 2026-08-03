@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod actions;
 mod chord;
+mod config;
 mod keycodes;
 
 /// capshift — caps-lock chord shortcut daemon for macOS.
