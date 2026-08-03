@@ -5,6 +5,8 @@ mod actions;
 mod chord;
 mod config;
 mod keycodes;
+#[cfg(target_os = "macos")]
+mod kvhd;
 
 /// capshift — caps-lock chord shortcut daemon for macOS.
 #[derive(Parser, Debug)]
