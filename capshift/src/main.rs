@@ -1,12 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
+use tracing::info;
 
 mod actions;
 mod chord;
 mod config;
+mod keycodes;
+
 #[cfg(target_os = "macos")]
 mod hid;
-mod keycodes;
 #[cfg(target_os = "macos")]
 mod kvhd;
 
@@ -23,6 +25,26 @@ async fn main() -> Result<()> {
 
     let _args = Args::parse();
 
-    tracing::info!("capshift starting (skeleton — no interception wired up yet)");
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("error: capshift only supports macOS");
+        std::process::exit(1);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let cfg_rx = config::watch()?;
+        info!("config: {}", config::config_path().display());
+
+        std::thread::spawn(move || {
+            if let Err(e) = hid::run(cfg_rx) {
+                tracing::error!("hid interceptor: {e}");
+                std::process::exit(1);
+            }
+        });
+
+        std::future::pending::<()>().await;
+    }
+
     Ok(())
 }
