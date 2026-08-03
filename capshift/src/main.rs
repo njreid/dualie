@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod chord;
 mod keycodes;
 
 /// capshift — caps-lock chord shortcut daemon for macOS.
