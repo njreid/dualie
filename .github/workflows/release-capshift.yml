@@ -1,0 +1,111 @@
+name: Release capshift
+
+on:
+  push:
+    tags: ["capshift-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14         # Apple Silicon runner
+            target: aarch64-apple-darwin
+          - os: macos-13         # Intel runner
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-capshift-${{ hashFiles('capshift/Cargo.lock') }}
+
+      - name: Build capshift
+        run: |
+          cargo build --manifest-path capshift/Cargo.toml \
+            --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#capshift-v}"
+          ARCHIVE="capshift-${VERSION}-${{ matrix.target }}.tar.gz"
+          cp "capshift/target/${{ matrix.target }}/release/capshift" capshift
+          tar -czf "$ARCHIVE" capshift
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
+          shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.tar.gz
+          generate_release_notes: true
+
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#capshift-v}"
+
+          sha_aarch64_darwin=$(cat dist/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
+          sha_x86_64_darwin=$(cat  dist/x86_64-apple-darwin/*.sha256  | awk '{print $1}')
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/dualie-dev/homebrew-dualie.git" tap
+          cd tap
+
+          FORMULA="Formula/capshift.rb"
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
+
+          python3 - "$FORMULA" "$sha_aarch64_darwin" "$sha_x86_64_darwin" <<'EOF'
+          import sys, re
+          path, *shas = sys.argv
+          content = open(path).read()
+          for sha in shas:
+              content = content.replace(
+                  '"0000000000000000000000000000000000000000000000000000000000000000"',
+                  f'"{sha}"', 1)
+          open(path, 'w').write(content)
+          EOF
+
+          git config user.email "ci@dualie.dev"
+          git config user.name  "Dualie CI"
+          git add "$FORMULA"
+          git commit -m "capshift ${VERSION}"
+          git push
