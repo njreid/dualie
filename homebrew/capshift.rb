@@ -19,8 +19,7 @@ class Capshift < Formula
       url "https://github.com/njreid/dualie/releases/download/capshift-v#{version}/capshift-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/njreid/dualie/releases/download/capshift-v#{version}/capshift-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      odie "capshift only supports Apple Silicon (arm64) Macs"
     end
   end
 

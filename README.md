@@ -106,10 +106,9 @@ brew install capshift
 brew services start capshift
 ```
 
-Prebuilt binaries are published for both Apple Silicon (`aarch64-apple-darwin` —
+Prebuilt binaries are published for Apple Silicon only (`aarch64-apple-darwin` —
 covers every Apple Silicon Mac, M1 through M4 and beyond, there's no
-per-chip build) and Intel (`x86_64-apple-darwin`); Homebrew picks the
-right one automatically.
+per-chip build). Intel Macs are not supported.
 
 To upgrade later: `brew upgrade capshift`. To stop the background
 service: `brew services stop capshift`.

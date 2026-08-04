@@ -21,8 +21,6 @@ jobs:
           # host; the resulting binary runs natively on any arm64 Mac.
           - os: macos-14         # Apple Silicon runner (M1 host, arm64 build)
             target: aarch64-apple-darwin
-          - os: macos-13         # Intel runner
-            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +89,6 @@ jobs:
           VERSION="${GITHUB_REF_NAME#capshift-v}"
 
           sha_aarch64_darwin=$(cat dist/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
-          sha_x86_64_darwin=$(cat  dist/x86_64-apple-darwin/*.sha256  | awk '{print $1}')
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/njreid/homebrew-capshift.git" tap
           cd tap
@@ -105,7 +102,7 @@ jobs:
           # release, since after that the file holds real hashes, not
           # placeholders. sys.argv[0] is "-" when the script comes from
           # stdin, so slice from sys.argv[1:] to get FORMULA + the shas.
-          python3 - "$FORMULA" "$sha_aarch64_darwin" "$sha_x86_64_darwin" <<'EOF'
+          python3 - "$FORMULA" "$sha_aarch64_darwin" <<'EOF'
           import sys, re
           path, *shas = sys.argv[1:]
           content = open(path).read()
