@@ -1,0 +1,40 @@
+name: Test capshift
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: cargo test -p capshift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-capshift-test-${{ hashFiles('Cargo.lock') }}
+
+      # capshift is macOS-only at runtime, but its non-FFI modules
+      # (keycodes/chord/actions/config) are pure/portable and build+test
+      # fine on Linux — this is the real regression gate for those, run on
+      # every push/PR rather than only at release time. hid.rs/kvhd.rs are
+      # #[cfg(target_os = "macos")]-gated out of this build entirely; the
+      # release-capshift.yml workflow's macOS build jobs are what exercise
+      # those. (Scoped to capshift only — daemon/hub/tui pull in native
+      # Linux deps like udev/arboard not yet confirmed present on this
+      # runner image; add them here once that's verified.)
+      - name: cargo test -p capshift
+        run: cargo test -p capshift --locked
