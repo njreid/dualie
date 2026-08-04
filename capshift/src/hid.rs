@@ -20,7 +20,7 @@
 /// `run()` blocks on `CFRunLoopRun()` — call from a dedicated OS thread.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 use anyhow::{bail, Result};
 use tokio::sync::watch;
@@ -73,9 +73,6 @@ extern "C" {
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
     fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
     fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
-
-    static kIOHIDDeviceUsagePageKey: CFStringRef;
-    static kIOHIDDeviceUsageKey: CFStringRef;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -90,6 +87,11 @@ extern "C" {
     ) -> CFDictionaryRef;
     fn CFDictionaryAddValue(dict: CFDictionaryRef, key: *const c_void, value: *const c_void);
     fn CFNumberCreate(allocator: CFAllocatorRef, the_type: i32, value_ptr: *const c_void) -> *mut c_void;
+    fn CFStringCreateWithCString(
+        allocator: CFAllocatorRef,
+        c_str: *const c_char,
+        encoding: u32,
+    ) -> CFStringRef;
     fn CFRelease(cf: *mut c_void);
 
     static kCFAllocatorDefault: CFAllocatorRef;
@@ -219,10 +221,22 @@ pub fn run(cfg_rx: watch::Receiver<HashMap<u8, Binding>>) -> Result<()> {
         let usage_num = kHIDUsage_GD_Keyboard as i32;
         let cf_page = CFNumberCreate(kCFAllocatorDefault, 3, &page_num as *const _ as *const c_void);
         let cf_usage = CFNumberCreate(kCFAllocatorDefault, 3, &usage_num as *const _ as *const c_void);
-        CFDictionaryAddValue(matching, kIOHIDDeviceUsagePageKey as *const c_void, cf_page);
-        CFDictionaryAddValue(matching, kIOHIDDeviceUsageKey as *const c_void, cf_usage);
+
+        // kIOHIDDeviceUsagePageKey / kIOHIDDeviceUsageKey are #define'd C string
+        // literals in IOKit's IOHIDKeys.h, not exported CFStringRef symbols — they
+        // can't be linked via `extern "C" static`, so build the CFStrings ourselves.
+        const K_ENCODING_UTF8: u32 = 0x0800_0100;
+        let usage_page_key =
+            CFStringCreateWithCString(kCFAllocatorDefault, c"DeviceUsagePage".as_ptr(), K_ENCODING_UTF8);
+        let usage_key =
+            CFStringCreateWithCString(kCFAllocatorDefault, c"DeviceUsage".as_ptr(), K_ENCODING_UTF8);
+
+        CFDictionaryAddValue(matching, usage_page_key as *const c_void, cf_page);
+        CFDictionaryAddValue(matching, usage_key as *const c_void, cf_usage);
         CFRelease(cf_page);
         CFRelease(cf_usage);
+        CFRelease(usage_page_key as *mut c_void);
+        CFRelease(usage_key as *mut c_void);
 
         IOHIDManagerSetDeviceMatching(mgr, matching);
         CFRelease(matching);
