@@ -98,7 +98,7 @@ sync — just caps+key shortcuts on one MacBook.
 - caps+`<key>` bound to `shell=` → run a shell command
 - caps+`<key>` bound to `key=` → remap to a different key (e.g. caps+h/j/k/l → arrow keys)
 
-### Install
+### Install (Homebrew)
 
 ```
 brew tap dualie-dev/dualie
@@ -106,9 +106,21 @@ brew install capshift
 brew services start capshift
 ```
 
+Prebuilt binaries are published for both Apple Silicon (`aarch64-apple-darwin` —
+covers every Apple Silicon Mac, M1 through M4 and beyond, there's no
+per-chip build) and Intel (`x86_64-apple-darwin`); Homebrew picks the
+right one automatically.
+
+To upgrade later: `brew upgrade capshift`. To stop the background
+service: `brew services stop capshift`.
+
 Requires:
 - Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
 - [Karabiner-Elements](https://karabiner-elements.pqrs.org/) installed and running (provides the virtual keyboard driver capshift injects keystrokes through)
+
+Note: while capshift is running, Caps Lock's normal toggle behavior is
+unavailable — capshift consumes the key entirely to use as a chord
+modifier and never re-injects it as a regular keypress.
 
 ### Config
 
