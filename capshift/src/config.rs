@@ -26,9 +26,9 @@ const DEFAULT_CONFIG: &str = r#"// ~/.config/capshift/config.kdl
 // bind "l" key="right"
 "#;
 
-pub fn config_path() -> PathBuf {
-    let home = std::env::var_os("HOME").expect("HOME environment variable not set");
-    PathBuf::from(home).join(".config").join("capshift").join("config.kdl")
+pub fn config_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME environment variable not set")?;
+    Ok(PathBuf::from(home).join(".config").join("capshift").join("config.kdl"))
 }
 
 /// Parse a KDL config document into a src-HID-keycode -> Binding map.
@@ -97,7 +97,7 @@ pub fn parse_bindings(src: &str) -> Result<HashMap<u8, Binding>> {
 }
 
 pub fn load_or_default() -> Result<HashMap<u8, Binding>> {
-    let path = config_path();
+    let path = config_path()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating config dir {}", dir.display()))?;
@@ -114,7 +114,7 @@ pub fn load_or_default() -> Result<HashMap<u8, Binding>> {
 /// Spawn a file watcher on `config.kdl`. Returns a `watch::Receiver` that
 /// yields the latest parsed bindings whenever the file changes.
 pub fn watch() -> Result<tokio::sync::watch::Receiver<HashMap<u8, Binding>>> {
-    let path = config_path();
+    let path = config_path()?;
     let initial = load_or_default()?;
     let (tx, rx) = tokio::sync::watch::channel(initial);
 

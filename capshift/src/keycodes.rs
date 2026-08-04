@@ -7,7 +7,7 @@ pub const CAPS_LOCK_HID: u8 = 0x39;
 /// "left"/"f1"/"enter") to its USB HID keycode (Usage Page 0x07).
 pub fn keycode_by_name(name: &str) -> Option<u8> {
     if name.len() == 1 {
-        let c = name.chars().next().unwrap();
+        let c = name.chars().next().unwrap().to_ascii_lowercase();
         if c.is_ascii_lowercase() {
             return Some(0x04 + (c as u8 - b'a'));
         }
@@ -91,6 +91,13 @@ mod tests {
         assert_eq!(keycode_by_name("z"), Some(0x1D));
         assert_eq!(keycode_by_name("1"), Some(0x1E));
         assert_eq!(keycode_by_name("0"), Some(0x27));
+    }
+
+    #[test]
+    fn single_char_letters_are_case_insensitive() {
+        assert_eq!(keycode_by_name("A"), Some(0x04));
+        assert_eq!(keycode_by_name("Z"), Some(0x1D));
+        assert_eq!(keycode_by_name("H"), keycode_by_name("h"));
     }
 
     #[test]

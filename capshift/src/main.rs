@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let cfg_rx = config::watch()?;
-        info!("config: {}", config::config_path().display());
+        info!("config: {}", config::config_path()?.display());
 
         std::thread::spawn(move || {
             if let Err(e) = hid::run(cfg_rx) {
