@@ -50,8 +50,9 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#capshift-v}"
           ARCHIVE="capshift-${VERSION}-${{ matrix.target }}.tar.gz"
-          cp "capshift/target/${{ matrix.target }}/release/capshift" capshift
-          tar -czf "$ARCHIVE" capshift
+          mkdir -p pkg
+          cp "target/${{ matrix.target }}/release/capshift" pkg/capshift
+          tar -czf "$ARCHIVE" -C pkg capshift
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
           shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
