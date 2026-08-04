@@ -126,17 +126,20 @@ jobs:
           FORMULA="Formula/dualie.rb"
           sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
 
-          # Replace each placeholder SHA in order of appearance
+          # Replace each sha256 line positionally (in the order the formula's
+          # on_macos/on_linux blocks list them), not by matching the literal
+          # placeholder text — that only worked on the very first release,
+          # since after that the file holds real hashes, not placeholders.
+          # sys.argv[0] is "-" when the script comes from stdin, so slice
+          # from sys.argv[1:] to get FORMULA + the shas.
           python3 - "$FORMULA" \
             "$sha_aarch64_darwin" "$sha_x86_64_darwin" \
             "$sha_x86_64_linux"  "$sha_aarch64_linux" <<'EOF'
           import sys, re
-          path, *shas = sys.argv
+          path, *shas = sys.argv[1:]
           content = open(path).read()
-          for sha in shas:
-              content = content.replace(
-                  '"0000000000000000000000000000000000000000000000000000000000000000"',
-                  f'"{sha}"', 1)
+          shas_iter = iter(shas)
+          content = re.sub(r'sha256 "[0-9a-f]{64}"', lambda m: f'sha256 "{next(shas_iter)}"', content)
           open(path, 'w').write(content)
           EOF
 

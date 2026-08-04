@@ -14,7 +14,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14         # Apple Silicon runner
+          # aarch64-apple-darwin is the single target triple for all Apple
+          # Silicon generations (M1 through M4 and beyond) — there is no
+          # per-chip target, so this covers M4 Macs already. macos-14 is a
+          # GitHub-hosted Apple Silicon (M1) runner used only as the build
+          # host; the resulting binary runs natively on any arm64 Mac.
+          - os: macos-14         # Apple Silicon runner (M1 host, arm64 build)
             target: aarch64-apple-darwin
           - os: macos-13         # Intel runner
             target: x86_64-apple-darwin
@@ -33,7 +38,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-capshift-${{ hashFiles('capshift/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-capshift-${{ hashFiles('Cargo.lock') }}
 
       - name: Build capshift
         run: |
@@ -93,14 +98,18 @@ jobs:
           FORMULA="Formula/capshift.rb"
           sed -i "s/version \".*\"/version \"${VERSION}\"/" "$FORMULA"
 
+          # Replace each sha256 line positionally (in the order the formula's
+          # `on_macos do ... end` block lists them), not by matching the
+          # literal placeholder text — that only worked on the very first
+          # release, since after that the file holds real hashes, not
+          # placeholders. sys.argv[0] is "-" when the script comes from
+          # stdin, so slice from sys.argv[1:] to get FORMULA + the shas.
           python3 - "$FORMULA" "$sha_aarch64_darwin" "$sha_x86_64_darwin" <<'EOF'
           import sys, re
-          path, *shas = sys.argv
+          path, *shas = sys.argv[1:]
           content = open(path).read()
-          for sha in shas:
-              content = content.replace(
-                  '"0000000000000000000000000000000000000000000000000000000000000000"',
-                  f'"{sha}"', 1)
+          shas_iter = iter(shas)
+          content = re.sub(r'sha256 "[0-9a-f]{64}"', lambda m: f'sha256 "{next(shas_iter)}"', content)
           open(path, 'w').write(content)
           EOF
 
