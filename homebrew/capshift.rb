@@ -27,6 +27,14 @@ class Capshift < Formula
     odie "capshift only supports macOS"
   end
 
+  # Standalone DriverKit virtual-keyboard driver (not the full
+  # Karabiner-Elements app) — see Casks/karabiner-driverkit-virtualhiddevice.rb
+  # in this tap. `brew install capshift` pulls it in automatically; see that
+  # cask's caveats for the manual driver-activation and daemon steps macOS
+  # requires (these can't be automated — driver extensions need interactive
+  # approval in System Settings).
+  depends_on cask: "njreid/capshift/karabiner-driverkit-virtualhiddevice"
+
   def install
     bin.install "capshift"
   end
@@ -39,9 +47,10 @@ class Capshift < Formula
       Accessibility permission is required for keyboard interception:
         System Settings → Privacy & Security → Accessibility → add capshift
 
-      Karabiner-Elements must also be installed and running (provides the
-      virtual keyboard driver capshift injects keystrokes through):
-        https://karabiner-elements.pqrs.org/
+      The Karabiner-DriverKit-VirtualHIDDevice driver (installed as a
+      dependency of this formula) must be activated and its daemon running
+      before capshift can inject keystrokes — see:
+        brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice
 
       Config file: ~/.config/capshift/config.kdl
     EOS
