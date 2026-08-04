@@ -1,25 +1,25 @@
 # Homebrew formula for capshift — caps-lock chord shortcut daemon.
 #
-# Published in the same tap as dualie:
-#   brew tap dualie-dev/dualie
+# Published in its own tap:
+#   brew tap njreid/capshift
 #   brew install capshift
 #
-# One-time setup (mirrors homebrew/dualie.rb): before the first
-# `capshift-v*` release tag is pushed, seed the tap repo with this file:
+# One-time setup: before the first `capshift-v*` release tag is pushed,
+# seed the tap repo with this file:
 #   cp homebrew/capshift.rb <tap-repo>/Formula/capshift.rb
 # Thereafter CI patches version/sha256 in place on every release.
 
 class Capshift < Formula
   desc "Caps-lock chord shortcut daemon for macOS — app launch/focus and key remaps"
-  homepage "https://github.com/dualie-dev/dualie"
+  homepage "https://github.com/njreid/dualie"
   version "0.1.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/dualie-dev/dualie/releases/download/capshift-v#{version}/capshift-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/njreid/dualie/releases/download/capshift-v#{version}/capshift-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/dualie-dev/dualie/releases/download/capshift-v#{version}/capshift-#{version}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/njreid/dualie/releases/download/capshift-v#{version}/capshift-#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end

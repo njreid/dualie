@@ -92,7 +92,7 @@ jobs:
           sha_aarch64_darwin=$(cat dist/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
           sha_x86_64_darwin=$(cat  dist/x86_64-apple-darwin/*.sha256  | awk '{print $1}')
 
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/dualie-dev/homebrew-dualie.git" tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/njreid/homebrew-capshift.git" tap
           cd tap
 
           FORMULA="Formula/capshift.rb"

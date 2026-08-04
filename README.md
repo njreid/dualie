@@ -101,7 +101,7 @@ sync — just caps+key shortcuts on one MacBook.
 ### Install (Homebrew)
 
 ```
-brew tap dualie-dev/dualie
+brew tap njreid/capshift
 brew install capshift
 brew services start capshift
 ```
