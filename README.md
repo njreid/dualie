@@ -103,20 +103,65 @@ sync — just caps+key shortcuts on one MacBook.
 ```
 brew tap njreid/capshift
 brew install capshift
-brew services start capshift
 ```
 
 Prebuilt binaries are published for Apple Silicon only (`aarch64-apple-darwin` —
 covers every Apple Silicon Mac, M1 through M4 and beyond, there's no
 per-chip build). Intel Macs are not supported.
 
-To upgrade later: `brew upgrade capshift`. To stop the background
-service: `brew services stop capshift`.
+### Run as root services
 
-The formula also packages a root LaunchDaemon for the required Karabiner
-VirtualHIDDevice daemon. Follow the commands printed by `brew info capshift`
-to install it under `/Library/LaunchDaemons`; launchd will start it at boot
-and restart it if it exits.
+Both processes need to run as root: the Karabiner daemon owns a root-only
+socket, and capshift connects to that socket. First activate and approve the
+DriverKit extension as described by:
+
+```sh
+brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice
+```
+
+Install the packaged Karabiner daemon plist and load it as a system
+LaunchDaemon:
+
+```sh
+sudo cp /opt/homebrew/opt/capshift/share/capshift/dev.njreid.capshift.kvhd.plist \
+  /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+sudo chmod 644 /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+sudo launchctl bootstrap system \
+  /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+```
+
+A root service reads its configuration from root's home directory. Seed it
+from the current user's configuration, then start capshift with Homebrew:
+
+```sh
+sudo mkdir -p /var/root/.config/capshift
+sudo cp "$HOME/.config/capshift/config.kdl" /var/root/.config/capshift/config.kdl
+sudo brew services start capshift
+```
+
+Both services now start during boot and restart if they exit. Inspect them
+and their logs with:
+
+```sh
+sudo launchctl print system/dev.njreid.capshift.kvhd
+sudo launchctl print system/homebrew.mxcl.capshift
+tail -f /var/log/capshift-kvhd.err.log
+tail -f /opt/homebrew/var/log/capshift.err
+```
+
+After changing the user configuration, copy it to the root configuration
+again. To restart or remove the services:
+
+```sh
+sudo brew services restart capshift
+sudo brew services stop capshift
+sudo launchctl bootout system/dev.njreid.capshift.kvhd
+sudo rm /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+```
+
+To upgrade later, run `brew upgrade capshift`, copy the packaged plist again
+if it changed, and restart both services.
 
 Requires:
 - Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
@@ -127,7 +172,9 @@ labeled Delete on an Apple keyboard) to toggle Caps Lock normally.
 
 ### Config
 
-Edit `~/.config/capshift/config.kdl` (created automatically on first run with commented-out examples):
+Edit `~/.config/capshift/config.kdl` (created automatically on first run with
+commented-out examples). When using the root service described above, its
+active path is `/var/root/.config/capshift/config.kdl`:
 
 ```kdl
 bind "s" app="com.tinyspeck.slackmacgap" label="Slack"
