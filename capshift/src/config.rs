@@ -121,24 +121,27 @@ pub fn load_or_default() -> Result<BindingMap> {
     parse_bindings(&src)
 }
 
-/// Spawn a file watcher on `config.kdl`. Returns a `watch::Receiver` that
-/// yields the latest parsed bindings whenever the file changes.
+/// Watch `config.kdl` for content changes using the platform event backend.
+/// The containing directory is watched so editor-style atomic replacements
+/// of the file continue to produce reload events.
 pub fn watch() -> Result<tokio::sync::watch::Receiver<BindingMap>> {
     let path = config_path()?;
     let initial = load_or_default()?;
+    let mut last_source = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
     let (tx, rx) = tokio::sync::watch::channel(initial);
 
     tokio::task::spawn_blocking(move || {
         use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-        let (ftx, frx) = std::sync::mpsc::channel();
-        let mut watcher: RecommendedWatcher = match notify::recommended_watcher(ftx) {
-            Ok(w) => w,
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let mut watcher: RecommendedWatcher = match notify::recommended_watcher(event_tx) {
+            Ok(watcher) => watcher,
             Err(e) => {
                 tracing::error!("config watcher: {e}");
                 return;
             }
         };
-
         let watch_dir = path.parent().unwrap_or(&path);
         if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
             tracing::error!("watch {}: {e}", watch_dir.display());
@@ -148,28 +151,39 @@ pub fn watch() -> Result<tokio::sync::watch::Receiver<BindingMap>> {
         tracing::info!("watching {} for config changes", path.display());
 
         loop {
-            match frx.recv() {
-                Ok(Ok(event)) => {
-                    if !event.paths.iter().any(|p| p == &path) {
-                        continue;
-                    }
-                    if matches!(
-                        event.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
-                            | notify::EventKind::Modify(notify::event::ModifyKind::Any)
-                    ) {
-                        match load_or_default() {
-                            Ok(bindings) => {
-                                tracing::info!("config reloaded");
-                                let _ = tx.send(bindings);
-                            }
-                            Err(e) => tracing::error!("config reload: {e:#}"),
-                        }
+            match event_rx.recv() {
+                Ok(Ok(_event)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("config watcher: {e}");
+                    continue;
+                }
+                Err(_) => break,
+            }
+
+            // FSEvents can emit several notifications for one save. Drain the
+            // already queued batch, then use the file contents as the source
+            // of truth. This also avoids reloading for unrelated directory events.
+            while event_rx.try_recv().is_ok() {}
+            let source = match std::fs::read_to_string(&path) {
+                Ok(source) => source,
+                Err(e) => {
+                    tracing::warn!("config reload {}: {e}", path.display());
+                    continue;
+                }
+            };
+            if source == last_source {
+                continue;
+            }
+            last_source = source.clone();
+
+            match parse_bindings(&source) {
+                Ok(bindings) => {
+                    tracing::info!("config reloaded");
+                    if tx.send(bindings).is_err() {
+                        break;
                     }
                 }
-                Ok(Err(e)) => tracing::warn!("watcher: {e}"),
-                Err(_) => break,
+                Err(e) => tracing::error!("config reload: {e:#}"),
             }
         }
     });

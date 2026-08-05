@@ -19,10 +19,9 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 kdl  = { version = "6" }
 
-# File watcher for config hot-reload (macos_kqueue kept for parity with the
-# daemon crate's own dependency spec; the Linux inotify backend used for
-# local `cargo test` runs is unaffected by this feature selection).
-notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+# Use macOS FSEvents rather than notify's kqueue backend. FSEvents watches the
+# containing directory, so atomic editor saves are handled without polling.
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 tokio-test = { version = "0.4" }
