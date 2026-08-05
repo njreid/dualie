@@ -24,7 +24,7 @@ use std::ffi::{c_char, c_void};
 
 use anyhow::{bail, Result};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::chord::{Binding, ChordState, KeyOutcome};
 use crate::keycodes::{hid_modifier_bit, CAPS_LOCK_HID};
@@ -166,7 +166,10 @@ unsafe extern "C" fn value_available(
             KeyOutcome::Swallow => {}
             KeyOutcome::Fire(action) => crate::actions::fire(&action),
             KeyOutcome::Passthrough => forward(state, usage, down),
-            KeyOutcome::Forward(target) => forward(state, target, down),
+            KeyOutcome::Forward(target) => {
+                debug!(source = usage, target, down, "capshift: forwarding remapped key");
+                forward(state, target, down)
+            }
         }
     });
 }

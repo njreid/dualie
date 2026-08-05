@@ -117,9 +117,8 @@ Requires:
 - Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
 - The [Karabiner-DriverKit-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice) driver (installed automatically as a dependency of the `capshift` formula — no need for the full Karabiner-Elements app). macOS requires you to manually activate the driver extension and start its daemon; run `brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice` for the exact steps.
 
-Note: while capshift is running, Caps Lock's normal toggle behavior is
-unavailable — capshift consumes the key entirely to use as a chord
-modifier and never re-injects it as a regular keypress.
+Capshift always consumes a bare Caps Lock press. Press Caps+Delete (the key
+labeled Delete on an Apple keyboard) to toggle Caps Lock normally.
 
 ### Config
 
@@ -138,6 +137,14 @@ bind "l" key="right"
 ```
 
 Changes are picked up automatically — no restart needed.
+
+To find bundle IDs for currently running applications:
+
+```sh
+capshift apps
+```
+
+The output is sorted as `name<TAB>bundle-id` for easy copying into `app=` bindings.
 
 ---
 

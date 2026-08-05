@@ -1,8 +1,10 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
+#[cfg(target_os = "macos")]
 use tracing::info;
 
 mod actions;
+mod apps;
 mod chord;
 mod config;
 mod keycodes;
@@ -14,7 +16,17 @@ mod hid;
 /// capshift — caps-lock chord shortcut daemon for macOS.
 #[derive(Parser, Debug)]
 #[command(version, about)]
-struct Args {}
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// List running applications as name<TAB>bundle-id.
+    #[command(alias = "applications")]
+    Apps,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,7 +34,12 @@ async fn main() -> Result<()> {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "capshift=info".into()))
         .init();
 
-    let _args = Args::parse();
+    let args = Args::parse();
+
+    if let Some(Command::Apps) = args.command {
+        apps::print_running()?;
+        return Ok(());
+    }
 
     #[cfg(not(target_os = "macos"))]
     {

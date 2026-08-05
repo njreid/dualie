@@ -45,8 +45,9 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::net::Shutdown;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -64,6 +65,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// daemon expects this native-endian u16 at the start of every request payload.
 const CLIENT_PROTOCOL_VERSION: u16 = 7;
 const MAX_FRAME_BODY_SIZE: usize = 1024 * 1024;
+const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const VIRTUAL_HID_KEYBOARD_READY_RESPONSE: u8 = 4;
 
 // ── cpp-unix_domain_stream wire framing ─────────────────────────────────────
 
@@ -154,7 +157,21 @@ fn post_keyboard_input_report_payload(modifier_bits: u8, keys: &[u8]) -> Vec<u8>
     request_payload(RequestType::PostKeyboardInputReport, &data)
 }
 
-fn run_reader(mut stream: UnixStream, writer: Arc<Mutex<UnixStream>>) {
+fn observe_service_state(payload: &[u8], ready: &Arc<(Mutex<bool>, Condvar)>) {
+    for pair in payload.chunks_exact(2) {
+        if pair[0] == VIRTUAL_HID_KEYBOARD_READY_RESPONSE {
+            let (lock, changed) = &**ready;
+            *lock.lock().unwrap() = pair[1] != 0;
+            changed.notify_all();
+        }
+    }
+}
+
+fn run_reader(
+    mut stream: UnixStream,
+    writer: Arc<Mutex<UnixStream>>,
+    ready: Arc<(Mutex<bool>, Condvar)>,
+) {
     loop {
         let mut header = [0u8; 4];
         if let Err(e) = stream.read_exact(&mut header) {
@@ -189,14 +206,20 @@ fn run_reader(mut stream: UnixStream, writer: Arc<Mutex<UnixStream>>) {
                     return;
                 }
                 let request_id = u64::from_be_bytes(body[1..9].try_into().unwrap());
+                observe_service_state(&body[9..], &ready);
                 let frame = make_request_response_frame(MessageType::Response, request_id, &[]);
                 if let Err(e) = writer.lock().unwrap().write_all(&frame) {
                     warn!("kvhd: daemon request acknowledgement failed: {e}");
                     return;
                 }
             }
-            // Responses to capshift's fire-and-forget requests need only be drained.
-            x if x == MessageType::Response as u8 => {}
+            x if x == MessageType::Response as u8 => {
+                if body.len() < 9 {
+                    warn!("kvhd: daemon response frame is too short");
+                    return;
+                }
+                observe_service_state(&body[9..], &ready);
+            }
             other => warn!("kvhd: ignoring unknown incoming message type {other}"),
         }
     }
@@ -224,11 +247,16 @@ impl KvhdHandle {
             .try_clone()
             .context("cloning KVHD socket for reader")?;
         let stream = Arc::new(Mutex::new(stream));
+        let ready = Arc::new((Mutex::new(false), Condvar::new()));
 
         let handle = Self {
             stream: stream.clone(),
             next_request_id: AtomicU64::new(1),
         };
+        let reader_writer = stream.clone();
+        let reader_ready = ready.clone();
+        thread::spawn(move || run_reader(reader, reader_writer, reader_ready));
+
         handle
             .send_request(&virtual_hid_keyboard_initialize_payload())
             .context("sending virtual_hid_keyboard_initialize")?;
@@ -236,8 +264,19 @@ impl KvhdHandle {
             "kvhd: connected, sent virtual_hid_keyboard_initialize (vendor=0x16c0 product=0x27db)"
         );
 
-        let reader_writer = stream.clone();
-        thread::spawn(move || run_reader(reader, reader_writer));
+        let (ready_lock, ready_changed) = &*ready;
+        let (ready_guard, _timeout) = ready_changed
+            .wait_timeout_while(ready_lock.lock().unwrap(), READY_TIMEOUT, |ready| !*ready)
+            .unwrap();
+        if !*ready_guard {
+            let _ = stream.lock().unwrap().shutdown(Shutdown::Both);
+            anyhow::bail!(
+                "Karabiner VirtualHIDKeyboard did not become ready within {} seconds",
+                READY_TIMEOUT.as_secs()
+            );
+        }
+        drop(ready_guard);
+        info!("kvhd: virtual HID keyboard ready");
 
         thread::spawn(move || loop {
             thread::sleep(HEARTBEAT_INTERVAL);
@@ -339,5 +378,15 @@ mod tests {
         let payload = post_keyboard_input_report_payload(0, &keys);
         assert_eq!(&payload[6..8], &0x0016u16.to_le_bytes());
         assert!(payload[8..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn readiness_response_updates_shared_state() {
+        let ready = Arc::new((Mutex::new(false), Condvar::new()));
+        observe_service_state(&[VIRTUAL_HID_KEYBOARD_READY_RESPONSE, 1], &ready);
+        assert!(*ready.0.lock().unwrap());
+
+        observe_service_state(&[VIRTUAL_HID_KEYBOARD_READY_RESPONSE, 0], &ready);
+        assert!(!*ready.0.lock().unwrap());
     }
 }

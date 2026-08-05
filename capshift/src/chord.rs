@@ -8,6 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// HID usage emitted by the key labeled Delete on Apple keyboards
+/// (Backspace in the USB HID usage table).
+const APPLE_DELETE_HID: u8 = 0x2A;
+
 /// An action fired when a chord's binding matches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -92,6 +96,13 @@ impl ChordState {
         }
 
         if self.active {
+            // Caps+physical Delete emits one real Caps Lock stroke. A bare
+            // Caps press remains swallowed unconditionally.
+            if hid == APPLE_DELETE_HID {
+                self.remapped.insert(hid, self.caps_lock_hid);
+                return KeyOutcome::Forward(self.caps_lock_hid);
+            }
+
             if let Some(binding) = self.bindings.get(&hid) {
                 return match binding {
                     Binding::Action(action) => {
@@ -200,5 +211,21 @@ mod tests {
         // The key-up for H must still translate to LEFT — the physical key
         // is still "in flight" from before the reload.
         assert_eq!(chord.process(H, false), KeyOutcome::Forward(LEFT));
+    }
+
+    #[test]
+    fn caps_delete_forwards_one_caps_lock_stroke() {
+        let mut chord = ChordState::new(CAPS, bindings());
+        assert_eq!(chord.process(CAPS, true), KeyOutcome::Swallow);
+        assert_eq!(chord.process(APPLE_DELETE_HID, true), KeyOutcome::Forward(CAPS));
+        assert_eq!(chord.process(APPLE_DELETE_HID, false), KeyOutcome::Forward(CAPS));
+        assert_eq!(chord.process(CAPS, false), KeyOutcome::Swallow);
+    }
+
+    #[test]
+    fn delete_without_caps_remains_backspace() {
+        let mut chord = ChordState::new(CAPS, bindings());
+        assert_eq!(chord.process(APPLE_DELETE_HID, true), KeyOutcome::Passthrough);
+        assert_eq!(chord.process(APPLE_DELETE_HID, false), KeyOutcome::Passthrough);
     }
 }
