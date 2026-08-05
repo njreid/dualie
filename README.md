@@ -102,6 +102,7 @@ sync — just caps+key shortcuts on one MacBook.
 
 ```
 brew tap njreid/capshift
+brew install --cask njreid/capshift/karabiner-driverkit-virtualhiddevice
 brew install capshift
 ```
 
@@ -165,7 +166,7 @@ if it changed, and restart both services.
 
 Requires:
 - Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
-- The [Karabiner-DriverKit-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice) driver (installed automatically as a dependency of the `capshift` formula — no need for the full Karabiner-Elements app). macOS requires you to manually activate the driver extension and start its daemon; run `brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice` for the exact steps.
+- The [Karabiner-DriverKit-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice) driver (installed separately with the cask above — no need for the full Karabiner-Elements app). macOS requires you to manually activate the driver extension and start its daemon; run `brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice` for the exact steps.
 
 Capshift always consumes a bare Caps Lock press. Press Caps+Delete (the key
 labeled Delete on an Apple keyboard) to toggle Caps Lock normally.

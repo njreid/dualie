@@ -1,3 +1,6 @@
+# typed: strict
+# frozen_string_literal: true
+
 # Homebrew formula for capshift — caps-lock chord shortcut daemon.
 #
 # Published in its own tap:
@@ -9,10 +12,13 @@
 #   cp homebrew/capshift.rb <tap-repo>/Formula/capshift.rb
 # Thereafter CI patches version/sha256 in place on every release.
 
+# Installs the prebuilt capshift daemon and its virtual-HID service definition.
 class Capshift < Formula
   desc "Caps-lock chord shortcut daemon for macOS — app launch/focus and key remaps"
   homepage "https://github.com/njreid/dualie"
   version "0.1.0"
+
+  depends_on :macos
 
   on_macos do
     if Hardware::CPU.arm?
@@ -23,18 +29,6 @@ class Capshift < Formula
     end
   end
 
-  on_linux do
-    odie "capshift only supports macOS"
-  end
-
-  # Standalone DriverKit virtual-keyboard driver (not the full
-  # Karabiner-Elements app) — see Casks/karabiner-driverkit-virtualhiddevice.rb
-  # in this tap. `brew install capshift` pulls it in automatically; see that
-  # cask's caveats for the manual driver-activation and daemon steps macOS
-  # requires (these can't be automated — driver extensions need interactive
-  # approval in System Settings).
-  depends_on cask: "njreid/capshift/karabiner-driverkit-virtualhiddevice"
-
   def install
     bin.install "capshift"
     pkgshare.install "dev.njreid.capshift.kvhd.plist"
@@ -42,6 +36,9 @@ class Capshift < Formula
 
   def caveats
     <<~EOS
+      First install the standalone virtual-HID driver if it is not installed:
+        brew install --cask njreid/capshift/karabiner-driverkit-virtualhiddevice
+
       Install and start the root-only Karabiner VirtualHIDDevice daemon:
         sudo cp "#{opt_pkgshare}/dev.njreid.capshift.kvhd.plist" /Library/LaunchDaemons/
         sudo chown root:wheel /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist

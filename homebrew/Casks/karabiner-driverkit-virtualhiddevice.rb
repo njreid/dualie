@@ -20,7 +20,7 @@ cask "karabiner-driverkit-virtualhiddevice" do
   desc "Standalone virtual keyboard/mouse DriverKit extension used by capshift"
   homepage "https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice"
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   pkg "Karabiner-DriverKit-VirtualHIDDevice-#{version}.pkg"
 
