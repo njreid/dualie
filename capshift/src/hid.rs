@@ -71,8 +71,10 @@ extern "C" {
     fn IOHIDDeviceOpen(device: IOHIDDeviceRef, options: u32) -> IOReturn;
     fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> i64;
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
+    fn IOHIDElementGetDevice(element: IOHIDElementRef) -> IOHIDDeviceRef;
     fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
     fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
+    fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) -> *const c_void;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -92,6 +94,7 @@ extern "C" {
         c_str: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
+    fn CFNumberGetValue(number: *const c_void, the_type: i32, value_ptr: *mut c_void) -> u8;
     fn CFRelease(cf: *mut c_void);
 
     static kCFAllocatorDefault: CFAllocatorRef;
@@ -105,6 +108,7 @@ struct HidState {
     cfg_rx: watch::Receiver<HashMap<u8, Binding>>,
     virtual_pressed: HashSet<u8>,
     modifier_bits: u8,
+    ignored_devices: HashSet<usize>,
     kvhd: KvhdHandle,
 }
 
@@ -118,12 +122,54 @@ unsafe extern "C" fn device_added(
     _sender: *mut c_void,
     device: IOHIDDeviceRef,
 ) {
+    if is_karabiner_virtual_keyboard(device) {
+        HID_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.ignored_devices.insert(device as usize);
+            }
+        });
+        info!("capshift: ignoring Karabiner virtual keyboard");
+        return;
+    }
+
     let ret = IOHIDDeviceOpen(device, kIOHIDOptionsTypeSeizeDevice);
     if ret == kIOReturnSuccess {
         info!("capshift: keyboard device seized");
     } else {
         warn!("capshift: failed to seize keyboard device: {ret:#x} (need Accessibility permission?)");
     }
+}
+
+unsafe fn is_karabiner_virtual_keyboard(device: IOHIDDeviceRef) -> bool {
+    const K_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
+
+    let vendor_key =
+        CFStringCreateWithCString(kCFAllocatorDefault, c"VendorID".as_ptr(), K_ENCODING_UTF8);
+    let product_key =
+        CFStringCreateWithCString(kCFAllocatorDefault, c"ProductID".as_ptr(), K_ENCODING_UTF8);
+
+    let mut vendor = 0i32;
+    let mut product = 0i32;
+    let vendor_number = IOHIDDeviceGetProperty(device, vendor_key);
+    let product_number = IOHIDDeviceGetProperty(device, product_key);
+    let vendor_ok = !vendor_number.is_null()
+        && CFNumberGetValue(
+            vendor_number,
+            K_CF_NUMBER_SINT32_TYPE,
+            &mut vendor as *mut _ as *mut c_void,
+        ) != 0;
+    let product_ok = !product_number.is_null()
+        && CFNumberGetValue(
+            product_number,
+            K_CF_NUMBER_SINT32_TYPE,
+            &mut product as *mut _ as *mut c_void,
+        ) != 0;
+
+    CFRelease(vendor_key as *mut c_void);
+    CFRelease(product_key as *mut c_void);
+
+    vendor_ok && product_ok && vendor == 0x16c0 && product == 0x27db
 }
 
 unsafe extern "C" fn value_available(
@@ -133,6 +179,7 @@ unsafe extern "C" fn value_available(
     value: IOHIDValueRef,
 ) {
     let element = IOHIDValueGetElement(value);
+    let device = IOHIDElementGetDevice(element);
     let usage_page = IOHIDElementGetUsagePage(element);
     if usage_page != kHIDPage_KeyboardOrKeypad {
         return;
@@ -145,6 +192,10 @@ unsafe extern "C" fn value_available(
     HID_STATE.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(state) = borrow.as_mut() else { return };
+
+        if state.ignored_devices.contains(&(device as usize)) {
+            return;
+        }
 
         if state.cfg_rx.has_changed().unwrap_or(false) {
             let bindings = state.cfg_rx.borrow_and_update().clone();
@@ -204,6 +255,7 @@ pub fn run(cfg_rx: watch::Receiver<HashMap<u8, Binding>>) -> Result<()> {
             cfg_rx,
             virtual_pressed: HashSet::new(),
             modifier_bits: 0,
+            ignored_devices: HashSet::new(),
             kvhd,
         });
     });
