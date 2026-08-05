@@ -26,7 +26,9 @@ use anyhow::{bail, Result};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::chord::{Binding, ChordState, KeyOutcome};
+use crate::chord::{
+    BindingMap, ChordState, KeyOutcome, MOD_COMMAND, MOD_CONTROL, MOD_OPTION, MOD_SHIFT,
+};
 use crate::keycodes::{hid_modifier_bit, CAPS_LOCK_HID};
 use crate::kvhd::{build_report, KvhdHandle};
 
@@ -105,9 +107,10 @@ extern "C" {
 
 struct HidState {
     chord: ChordState,
-    cfg_rx: watch::Receiver<HashMap<u8, Binding>>,
+    cfg_rx: watch::Receiver<BindingMap>,
     virtual_pressed: HashSet<u8>,
     modifier_bits: u8,
+    suppressed_modifiers: HashMap<u8, u8>,
     ignored_devices: HashSet<usize>,
     kvhd: KvhdHandle,
 }
@@ -217,13 +220,24 @@ unsafe extern "C" fn value_available(
             return;
         }
 
-        match state.chord.process(usage, down) {
+        let logical_modifiers = logical_modifiers(state.modifier_bits);
+        match state.chord.process_with_modifiers(usage, down, logical_modifiers) {
             KeyOutcome::Swallow => {}
             KeyOutcome::Fire(action) => crate::actions::fire(&action),
             KeyOutcome::Passthrough => forward(state, usage, down),
-            KeyOutcome::Forward(target) => {
-                debug!(source = usage, target, down, "capshift: forwarding remapped key");
-                forward(state, target, down)
+            KeyOutcome::Forward { target, suppress_modifiers } => {
+                debug!(source = usage, target, down, suppress_modifiers, "capshift: forwarding remapped key");
+                if down {
+                    let raw_mask = raw_modifier_mask(suppress_modifiers) & state.modifier_bits;
+                    state.suppressed_modifiers.insert(usage, raw_mask);
+                    forward(state, target, true);
+                } else {
+                    // Keep trigger modifiers suppressed through the target's
+                    // key-up, then restore any still-held modifier afterward.
+                    forward(state, target, false);
+                    state.suppressed_modifiers.remove(&usage);
+                    post(state);
+                }
             }
         }
     });
@@ -239,14 +253,33 @@ fn forward(state: &mut HidState, hid: u8, down: bool) {
 }
 
 fn post(state: &HidState) {
-    let report = build_report(state.modifier_bits, &state.virtual_pressed);
+    let suppressed = state.suppressed_modifiers.values().fold(0, |all, mask| all | mask);
+    let report = build_report(state.modifier_bits & !suppressed, &state.virtual_pressed);
     if let Err(e) = state.kvhd.post_report(&report) {
         warn!("capshift: KVHD post_report failed: {e}");
     }
 }
 
 /// Run the macOS keyboard interception loop. Blocks until an error occurs.
-pub fn run(cfg_rx: watch::Receiver<HashMap<u8, Binding>>) -> Result<()> {
+fn logical_modifiers(raw: u8) -> u8 {
+    let mut logical = 0;
+    if raw & 0x22 != 0 { logical |= MOD_SHIFT; }
+    if raw & 0x11 != 0 { logical |= MOD_CONTROL; }
+    if raw & 0x44 != 0 { logical |= MOD_OPTION; }
+    if raw & 0x88 != 0 { logical |= MOD_COMMAND; }
+    logical
+}
+
+fn raw_modifier_mask(logical: u8) -> u8 {
+    let mut raw = 0;
+    if logical & MOD_SHIFT != 0 { raw |= 0x22; }
+    if logical & MOD_CONTROL != 0 { raw |= 0x11; }
+    if logical & MOD_OPTION != 0 { raw |= 0x44; }
+    if logical & MOD_COMMAND != 0 { raw |= 0x88; }
+    raw
+}
+
+pub fn run(cfg_rx: watch::Receiver<BindingMap>) -> Result<()> {
     let kvhd = KvhdHandle::open()?;
     info!("capshift: Karabiner VirtualHIDKeyboard connected");
 
@@ -259,6 +292,7 @@ pub fn run(cfg_rx: watch::Receiver<HashMap<u8, Binding>>) -> Result<()> {
             cfg_rx,
             virtual_pressed: HashSet::new(),
             modifier_bits: 0,
+            suppressed_modifiers: HashMap::new(),
             ignored_devices: HashSet::new(),
             kvhd,
         });

@@ -1,12 +1,13 @@
 //! config.rs — loads and hot-reloads `~/.config/capshift/config.kdl`.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use kdl::{KdlDocument, KdlNode};
 
-use crate::chord::{Action, Binding};
+use crate::chord::{
+    Action, Binding, BindingKey, BindingMap, MOD_COMMAND, MOD_CONTROL, MOD_OPTION, MOD_SHIFT,
+};
 use crate::keycodes::keycode_by_name;
 
 const DEFAULT_CONFIG: &str = r#"// ~/.config/capshift/config.kdl
@@ -14,6 +15,7 @@ const DEFAULT_CONFIG: &str = r#"// ~/.config/capshift/config.kdl
 // bind "<key>" app="<bundle-id>" label="<name>"   — focus/launch an app
 // bind "<key>" shell="<command>" label="<name>"    — run a shell command
 // bind "<key>" key="<target-key-name>"             — remap caps+<key> to another key
+// Add mod="shift", "control", "option", or "command" for caps+modifier+key.
 
 // bind "s" app="com.tinyspeck.slackmacgap" label="Slack"
 // bind "m" app="com.apple.mail" label="Mail"
@@ -24,6 +26,8 @@ const DEFAULT_CONFIG: &str = r#"// ~/.config/capshift/config.kdl
 // bind "j" key="down"
 // bind "k" key="up"
 // bind "l" key="right"
+// bind "h" mod="shift" key="home"
+// bind "l" mod="shift" key="end"
 "#;
 
 pub fn config_path() -> Result<PathBuf> {
@@ -34,9 +38,9 @@ pub fn config_path() -> Result<PathBuf> {
 /// Parse a KDL config document into a src-HID-keycode -> Binding map.
 /// Invalid individual `bind` lines are logged and skipped; parsing keeps
 /// going so the rest of the file still loads.
-pub fn parse_bindings(src: &str) -> Result<HashMap<u8, Binding>> {
+pub fn parse_bindings(src: &str) -> Result<BindingMap> {
     let doc: KdlDocument = src.parse().context("parsing config.kdl")?;
-    let mut bindings = HashMap::new();
+    let mut bindings = BindingMap::new();
 
     for node in doc.nodes() {
         if node.name().value() != "bind" {
@@ -57,6 +61,11 @@ pub fn parse_bindings(src: &str) -> Result<HashMap<u8, Binding>> {
         let shell = prop_str(node, "shell");
         let key = prop_str(node, "key");
         let label = prop_str(node, "label");
+        let modifier_name = prop_str(node, "mod").or_else(|| prop_str(node, "modifier"));
+        let Some(modifiers) = parse_modifiers(modifier_name.unwrap_or("")) else {
+            tracing::warn!(key_name, modifier = modifier_name, "config: unknown modifier");
+            continue;
+        };
 
         let present = [app.is_some(), shell.is_some(), key.is_some()]
             .iter()
@@ -88,7 +97,8 @@ pub fn parse_bindings(src: &str) -> Result<HashMap<u8, Binding>> {
             Binding::Remap(target_hid)
         };
 
-        if bindings.insert(src_hid, binding).is_some() {
+        let binding_key = BindingKey { hid: src_hid, modifiers };
+        if bindings.insert(binding_key, binding).is_some() {
             tracing::warn!(key_name, "config: duplicate binding, last one wins");
         }
     }
@@ -96,7 +106,7 @@ pub fn parse_bindings(src: &str) -> Result<HashMap<u8, Binding>> {
     Ok(bindings)
 }
 
-pub fn load_or_default() -> Result<HashMap<u8, Binding>> {
+pub fn load_or_default() -> Result<BindingMap> {
     let path = config_path()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -113,7 +123,7 @@ pub fn load_or_default() -> Result<HashMap<u8, Binding>> {
 
 /// Spawn a file watcher on `config.kdl`. Returns a `watch::Receiver` that
 /// yields the latest parsed bindings whenever the file changes.
-pub fn watch() -> Result<tokio::sync::watch::Receiver<HashMap<u8, Binding>>> {
+pub fn watch() -> Result<tokio::sync::watch::Receiver<BindingMap>> {
     let path = config_path()?;
     let initial = load_or_default()?;
     let (tx, rx) = tokio::sync::watch::channel(initial);
@@ -182,15 +192,33 @@ fn prop_str<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
         .and_then(|e| e.value().as_string())
 }
 
+fn parse_modifiers(value: &str) -> Option<u8> {
+    let mut result = 0;
+    for name in value.split('+').filter(|part| !part.is_empty()) {
+        result |= match name.to_ascii_lowercase().as_str() {
+            "shift" => MOD_SHIFT,
+            "control" | "ctrl" => MOD_CONTROL,
+            "option" | "alt" => MOD_OPTION,
+            "command" | "cmd" | "meta" => MOD_COMMAND,
+            _ => return None,
+        };
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(hid: u8) -> BindingKey {
+        BindingKey { hid, modifiers: 0 }
+    }
 
     #[test]
     fn parses_app_binding() {
         let bindings = parse_bindings(r#"bind "s" app="com.tinyspeck.slackmacgap" label="Slack""#).unwrap();
         assert_eq!(
-            bindings.get(&0x16), // 's'
+            bindings.get(&key(0x16)), // 's'
             Some(&Binding::Action(Action::AppLaunch {
                 app_id: "com.tinyspeck.slackmacgap".into(),
                 label: "Slack".into(),
@@ -202,7 +230,7 @@ mod tests {
     fn parses_shell_binding() {
         let bindings = parse_bindings(r#"bind "t" shell="open -a Terminal" label="Terminal""#).unwrap();
         assert_eq!(
-            bindings.get(&0x17), // 't'
+            bindings.get(&key(0x17)), // 't'
             Some(&Binding::Action(Action::ShellCommand {
                 command: "open -a Terminal".into(),
                 label: "Terminal".into(),
@@ -213,7 +241,7 @@ mod tests {
     #[test]
     fn parses_key_remap_binding() {
         let bindings = parse_bindings(r#"bind "h" key="left""#).unwrap();
-        assert_eq!(bindings.get(&0x0B), Some(&Binding::Remap(0x50))); // 'h' -> left
+        assert_eq!(bindings.get(&key(0x0B)), Some(&Binding::Remap(0x50))); // 'h' -> left
     }
 
     #[test]
@@ -258,7 +286,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(bindings.get(&0x0B), Some(&Binding::Remap(0x4F))); // right
+        assert_eq!(bindings.get(&key(0x0B)), Some(&Binding::Remap(0x4F))); // right
     }
 
     #[test]
@@ -271,5 +299,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bindings.len(), 1);
+    }
+
+    #[test]
+    fn plain_and_shift_bindings_can_coexist() {
+        let bindings = parse_bindings(
+            r#"
+            bind "h" key="left"
+            bind "h" mod="shift" key="home"
+            bind "l" modifier="shift" key="end"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(bindings.get(&key(0x0B)), Some(&Binding::Remap(0x50)));
+        assert_eq!(
+            bindings.get(&BindingKey { hid: 0x0B, modifiers: MOD_SHIFT }),
+            Some(&Binding::Remap(0x4A))
+        );
+        assert_eq!(
+            bindings.get(&BindingKey { hid: 0x0F, modifiers: MOD_SHIFT }),
+            Some(&Binding::Remap(0x4D))
+        );
     }
 }

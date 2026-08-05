@@ -37,19 +37,25 @@ class Capshift < Formula
 
   def install
     bin.install "capshift"
+    pkgshare.install "dev.njreid.capshift.kvhd.plist"
   end
 
   def caveats
     <<~EOS
-      To start capshift now and restart at login:
-        brew services start capshift
+      Install and start the root-only Karabiner VirtualHIDDevice daemon:
+        sudo cp "#{opt_pkgshare}/dev.njreid.capshift.kvhd.plist" /Library/LaunchDaemons/
+        sudo chown root:wheel /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+        sudo chmod 644 /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+        sudo launchctl bootstrap system /Library/LaunchDaemons/dev.njreid.capshift.kvhd.plist
+
+      Then start capshift as a root service so it can access that daemon:
+        sudo brew services start capshift
 
       Accessibility permission is required for keyboard interception:
         System Settings → Privacy & Security → Accessibility → add capshift
 
-      The Karabiner-DriverKit-VirtualHIDDevice driver (installed as a
-      dependency of this formula) must be activated and its daemon running
-      before capshift can inject keystrokes — see:
+      The Karabiner-DriverKit-VirtualHIDDevice driver must still be approved
+      interactively before its daemon can create a virtual keyboard — see:
         brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice
 
       Config file: ~/.config/capshift/config.kdl

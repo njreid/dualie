@@ -113,6 +113,11 @@ per-chip build). Intel Macs are not supported.
 To upgrade later: `brew upgrade capshift`. To stop the background
 service: `brew services stop capshift`.
 
+The formula also packages a root LaunchDaemon for the required Karabiner
+VirtualHIDDevice daemon. Follow the commands printed by `brew info capshift`
+to install it under `/Library/LaunchDaemons`; launchd will start it at boot
+and restart it if it exits.
+
 Requires:
 - Accessibility permission (System Settings → Privacy & Security → Accessibility → add capshift)
 - The [Karabiner-DriverKit-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice) driver (installed automatically as a dependency of the `capshift` formula — no need for the full Karabiner-Elements app). macOS requires you to manually activate the driver extension and start its daemon; run `brew info --cask njreid/capshift/karabiner-driverkit-virtualhiddevice` for the exact steps.
@@ -134,7 +139,17 @@ bind "h" key="left"
 bind "j" key="down"
 bind "k" key="up"
 bind "l" key="right"
+
+// Modifier-specific bindings; either left or right Shift matches.
+bind "h" mod="shift" key="home"
+bind "l" mod="shift" key="end"
 ```
+
+`mod=` accepts `shift`, `control`/`ctrl`, `option`/`alt`, and
+`command`/`cmd`. Join modifiers with `+` (for example,
+`mod="command+shift"`). Modifier-specific and unmodified bindings for the
+same key can coexist. Trigger modifiers are consumed for key remaps, so
+Caps+Shift+H above emits plain Home rather than Shift+Home.
 
 Changes are picked up automatically — no restart needed.
 

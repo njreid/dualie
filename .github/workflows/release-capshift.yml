@@ -50,7 +50,8 @@ jobs:
           ARCHIVE="capshift-${VERSION}-${{ matrix.target }}.tar.gz"
           mkdir -p pkg
           cp "target/${{ matrix.target }}/release/capshift" pkg/capshift
-          tar -czf "$ARCHIVE" -C pkg capshift
+          cp resources/dev.njreid.capshift.kvhd.plist pkg/dev.njreid.capshift.kvhd.plist
+          tar -czf "$ARCHIVE" -C pkg capshift dev.njreid.capshift.kvhd.plist
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
           shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"

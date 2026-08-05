@@ -41,10 +41,8 @@ cask "karabiner-driverkit-virtualhiddevice" do
        → Driver Extensions — you must approve it there):
          /Applications/.Karabiner-VirtualHIDDevice-Manager.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Manager activate
 
-    2. Run the daemon that mediates between capshift and the driver
-       (must run as root; capshift will not work without it):
-         sudo '/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon'
-
-       Consider wrapping step 2 in a launchd job so it survives reboots.
+    2. Install capshift, then follow its caveats to install the packaged
+       root LaunchDaemon that starts and supervises this daemon at boot:
+         brew info capshift
   EOS
 end

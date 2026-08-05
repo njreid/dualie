@@ -8,6 +8,19 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub const MOD_SHIFT: u8 = 1 << 0;
+pub const MOD_CONTROL: u8 = 1 << 1;
+pub const MOD_OPTION: u8 = 1 << 2;
+pub const MOD_COMMAND: u8 = 1 << 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BindingKey {
+    pub hid: u8,
+    pub modifiers: u8,
+}
+
+pub type BindingMap = HashMap<BindingKey, Binding>;
+
 /// HID usage emitted by the key labeled Delete on Apple keyboards
 /// (Backspace in the USB HID usage table).
 const APPLE_DELETE_HID: u8 = 0x2A;
@@ -35,7 +48,11 @@ pub enum KeyOutcome {
     /// Forward the original HID keycode unchanged.
     Passthrough,
     /// Forward a different HID keycode instead of the original.
-    Forward(u8),
+    Forward {
+        target: u8,
+        /// Logical trigger modifiers that must not reach the remapped key.
+        suppress_modifiers: u8,
+    },
     /// Fire this action; do not forward the original keycode.
     Fire(Action),
 }
@@ -44,13 +61,13 @@ pub enum KeyOutcome {
 /// src-HID-keycode -> Binding table.
 pub struct ChordState {
     caps_lock_hid: u8,
-    bindings: HashMap<u8, Binding>,
+    bindings: BindingMap,
     active: bool,
     /// Src HID keycode -> HID keycode actually forwarded, for keys currently
     /// down as part of a matched remap binding. Ensures the key-up event is
     /// translated to match the key-down we already sent, even if Caps Lock
     /// was released in between.
-    remapped: HashMap<u8, u8>,
+    remapped: HashMap<u8, (u8, u8)>,
     /// Src HID keycodes currently down as part of a matched action binding,
     /// so their key-up is swallowed instead of leaking through as a stray
     /// keypress.
@@ -58,7 +75,7 @@ pub struct ChordState {
 }
 
 impl ChordState {
-    pub fn new(caps_lock_hid: u8, bindings: HashMap<u8, Binding>) -> Self {
+    pub fn new(caps_lock_hid: u8, bindings: BindingMap) -> Self {
         Self {
             caps_lock_hid,
             bindings,
@@ -71,7 +88,7 @@ impl ChordState {
     /// Update the binding table in place, preserving in-flight chord state
     /// (active/remapped/fired) so a config reload never loses track of a
     /// physical key the user is still holding down mid-chord.
-    pub fn set_bindings(&mut self, bindings: HashMap<u8, Binding>) {
+    pub fn set_bindings(&mut self, bindings: BindingMap) {
         self.bindings = bindings;
     }
 
@@ -79,15 +96,20 @@ impl ChordState {
     ///
     /// `hid`  — HID keycode (Usage Page 0x07) of the key.
     /// `down` — true for key-down, false for key-up.
+    #[cfg(test)]
     pub fn process(&mut self, hid: u8, down: bool) -> KeyOutcome {
+        self.process_with_modifiers(hid, down, 0)
+    }
+
+    pub fn process_with_modifiers(&mut self, hid: u8, down: bool, modifiers: u8) -> KeyOutcome {
         if hid == self.caps_lock_hid {
             self.active = down;
             return KeyOutcome::Swallow;
         }
 
         if !down {
-            if let Some(target) = self.remapped.remove(&hid) {
-                return KeyOutcome::Forward(target);
+            if let Some((target, suppress_modifiers)) = self.remapped.remove(&hid) {
+                return KeyOutcome::Forward { target, suppress_modifiers };
             }
             if self.fired.remove(&hid) {
                 return KeyOutcome::Swallow;
@@ -99,19 +121,20 @@ impl ChordState {
             // Caps+physical Delete emits one real Caps Lock stroke. A bare
             // Caps press remains swallowed unconditionally.
             if hid == APPLE_DELETE_HID {
-                self.remapped.insert(hid, self.caps_lock_hid);
-                return KeyOutcome::Forward(self.caps_lock_hid);
+                self.remapped.insert(hid, (self.caps_lock_hid, 0));
+                return KeyOutcome::Forward { target: self.caps_lock_hid, suppress_modifiers: 0 };
             }
 
-            if let Some(binding) = self.bindings.get(&hid) {
+            let binding_key = BindingKey { hid, modifiers };
+            if let Some(binding) = self.bindings.get(&binding_key) {
                 return match binding {
                     Binding::Action(action) => {
                         self.fired.insert(hid);
                         KeyOutcome::Fire(action.clone())
                     }
                     Binding::Remap(target) => {
-                        self.remapped.insert(hid, *target);
-                        KeyOutcome::Forward(*target)
+                        self.remapped.insert(hid, (*target, modifiers));
+                        KeyOutcome::Forward { target: *target, suppress_modifiers: modifiers }
                     }
                 };
             }
@@ -135,11 +158,15 @@ mod tests {
         Action::AppLaunch { app_id: "com.tinyspeck.slackmacgap".into(), label: "Slack".into() }
     }
 
-    fn bindings() -> HashMap<u8, Binding> {
+    fn bindings() -> BindingMap {
         let mut m = HashMap::new();
-        m.insert(H, Binding::Remap(LEFT));
-        m.insert(S, Binding::Action(slack()));
+        m.insert(BindingKey { hid: H, modifiers: 0 }, Binding::Remap(LEFT));
+        m.insert(BindingKey { hid: S, modifiers: 0 }, Binding::Action(slack()));
         m
+    }
+
+    fn forwarded(target: u8) -> KeyOutcome {
+        KeyOutcome::Forward { target, suppress_modifiers: 0 }
     }
 
     #[test]
@@ -167,8 +194,8 @@ mod tests {
     fn remap_binding_forwards_target_keycode() {
         let mut chord = ChordState::new(CAPS, bindings());
         chord.process(CAPS, true);
-        assert_eq!(chord.process(H, true), KeyOutcome::Forward(LEFT));
-        assert_eq!(chord.process(H, false), KeyOutcome::Forward(LEFT));
+        assert_eq!(chord.process(H, true), forwarded(LEFT));
+        assert_eq!(chord.process(H, false), forwarded(LEFT));
     }
 
     #[test]
@@ -177,9 +204,9 @@ mod tests {
         // still translate to LEFT so the virtual key doesn't get stuck down.
         let mut chord = ChordState::new(CAPS, bindings());
         chord.process(CAPS, true);
-        assert_eq!(chord.process(H, true), KeyOutcome::Forward(LEFT));
+        assert_eq!(chord.process(H, true), forwarded(LEFT));
         assert_eq!(chord.process(CAPS, false), KeyOutcome::Swallow);
-        assert_eq!(chord.process(H, false), KeyOutcome::Forward(LEFT));
+        assert_eq!(chord.process(H, false), forwarded(LEFT));
     }
 
     #[test]
@@ -202,7 +229,7 @@ mod tests {
     fn set_bindings_does_not_disrupt_in_flight_remap() {
         let mut chord = ChordState::new(CAPS, bindings());
         chord.process(CAPS, true);
-        assert_eq!(chord.process(H, true), KeyOutcome::Forward(LEFT));
+        assert_eq!(chord.process(H, true), forwarded(LEFT));
 
         // Config reloads mid-chord with a completely different binding table
         // (H is no longer bound to anything).
@@ -210,15 +237,15 @@ mod tests {
 
         // The key-up for H must still translate to LEFT — the physical key
         // is still "in flight" from before the reload.
-        assert_eq!(chord.process(H, false), KeyOutcome::Forward(LEFT));
+        assert_eq!(chord.process(H, false), forwarded(LEFT));
     }
 
     #[test]
     fn caps_delete_forwards_one_caps_lock_stroke() {
         let mut chord = ChordState::new(CAPS, bindings());
         assert_eq!(chord.process(CAPS, true), KeyOutcome::Swallow);
-        assert_eq!(chord.process(APPLE_DELETE_HID, true), KeyOutcome::Forward(CAPS));
-        assert_eq!(chord.process(APPLE_DELETE_HID, false), KeyOutcome::Forward(CAPS));
+        assert_eq!(chord.process(APPLE_DELETE_HID, true), forwarded(CAPS));
+        assert_eq!(chord.process(APPLE_DELETE_HID, false), forwarded(CAPS));
         assert_eq!(chord.process(CAPS, false), KeyOutcome::Swallow);
     }
 
@@ -227,5 +254,24 @@ mod tests {
         let mut chord = ChordState::new(CAPS, bindings());
         assert_eq!(chord.process(APPLE_DELETE_HID, true), KeyOutcome::Passthrough);
         assert_eq!(chord.process(APPLE_DELETE_HID, false), KeyOutcome::Passthrough);
+    }
+
+    #[test]
+    fn modifier_binding_is_distinct_and_consumes_trigger_modifier() {
+        let mut bindings = bindings();
+        bindings.insert(
+            BindingKey { hid: H, modifiers: MOD_SHIFT },
+            Binding::Remap(0x4A), // Home
+        );
+        let mut chord = ChordState::new(CAPS, bindings);
+        chord.process(CAPS, true);
+        assert_eq!(
+            chord.process_with_modifiers(H, true, MOD_SHIFT),
+            KeyOutcome::Forward { target: 0x4A, suppress_modifiers: MOD_SHIFT }
+        );
+        assert_eq!(
+            chord.process_with_modifiers(H, false, MOD_SHIFT),
+            KeyOutcome::Forward { target: 0x4A, suppress_modifiers: MOD_SHIFT }
+        );
     }
 }
