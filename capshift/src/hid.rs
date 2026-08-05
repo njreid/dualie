@@ -68,7 +68,7 @@ extern "C" {
         context: *mut c_void,
     );
     fn IOHIDManagerScheduleWithRunLoop(manager: IOHIDManagerRef, run_loop: CFRunLoopRef, mode: CFStringRef);
-    fn IOHIDDeviceOpen(device: IOHIDDeviceRef, options: u32) -> IOReturn;
+    fn IOHIDDeviceClose(device: IOHIDDeviceRef, options: u32) -> IOReturn;
     fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> i64;
     fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
     fn IOHIDElementGetDevice(element: IOHIDElementRef) -> IOHIDDeviceRef;
@@ -123,21 +123,25 @@ unsafe extern "C" fn device_added(
     device: IOHIDDeviceRef,
 ) {
     if is_karabiner_virtual_keyboard(device) {
+        // The manager is opened with SeizeDevice so physical input cannot
+        // leak through. Release its automatic open on our output device;
+        // otherwise capshift would also suppress its own injected reports.
+        let ret = IOHIDDeviceClose(device, kIOHIDOptionsTypeNone);
         HID_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
                 state.ignored_devices.insert(device as usize);
             }
         });
-        info!("capshift: ignoring Karabiner virtual keyboard");
+        if ret == kIOReturnSuccess {
+            info!("capshift: ignoring Karabiner virtual keyboard");
+        } else {
+            warn!("capshift: failed to release Karabiner virtual keyboard: {ret:#x}");
+        }
         return;
     }
 
-    let ret = IOHIDDeviceOpen(device, kIOHIDOptionsTypeSeizeDevice);
-    if ret == kIOReturnSuccess {
-        info!("capshift: keyboard device seized");
-    } else {
-        warn!("capshift: failed to seize keyboard device: {ret:#x} (need Accessibility permission?)");
-    }
+    // IOHIDManagerOpen performed the exclusive open for every matched device.
+    info!("capshift: keyboard device seized");
 }
 
 unsafe fn is_karabiner_virtual_keyboard(device: IOHIDDeviceRef) -> bool {
@@ -300,7 +304,11 @@ pub fn run(cfg_rx: watch::Receiver<HashMap<u8, Binding>>) -> Result<()> {
         IOHIDManagerRegisterInputValueCallback(mgr, value_available, std::ptr::null_mut());
         IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
 
-        let ret = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
+        // Seize on the manager's initial open. Opening the manager normally
+        // and then calling IOHIDDeviceOpen(SeizeDevice) from device_added can
+        // leave the manager's original non-exclusive open in place, allowing
+        // the physical keystroke to leak alongside the injected remap.
+        let ret = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeSeizeDevice);
         if ret != kIOReturnSuccess {
             bail!("IOHIDManagerOpen failed: {ret:#x}");
         }
