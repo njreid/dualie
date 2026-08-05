@@ -25,7 +25,11 @@ struct Args {
 enum Command {
     /// List running applications as name<TAB>bundle-id.
     #[command(alias = "applications")]
-    Apps,
+    Apps {
+        /// Include background agents, helpers, and UI services.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[tokio::main]
@@ -36,8 +40,8 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    if let Some(Command::Apps) = args.command {
-        apps::print_running()?;
+    if let Some(Command::Apps { all }) = args.command {
+        apps::print_running(all)?;
         return Ok(());
     }
 

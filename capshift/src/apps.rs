@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use anyhow::Context;
 
 #[cfg(target_os = "macos")]
-pub fn print_running() -> Result<()> {
+pub fn print_running(include_background: bool) -> Result<()> {
     // JXA's Objective-C bridge reads NSWorkspace directly. Unlike asking
     // System Events, this does not require Automation permission.
     const SCRIPT: &str = r#"
@@ -14,6 +14,7 @@ const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
 const rows = [];
 for (let i = 0; i < apps.count; i++) {
     const app = apps.objectAtIndex(i);
+    if (!INCLUDE_BACKGROUND && Number(app.activationPolicy) !== 0) continue;
     const name = ObjC.unwrap(app.localizedName);
     const id = ObjC.unwrap(app.bundleIdentifier);
     if (name && id) rows.push(name + '\t' + id);
@@ -21,8 +22,12 @@ for (let i = 0; i < apps.count; i++) {
 rows.join('\n');
 "#;
 
+    let script = SCRIPT.replace(
+        "INCLUDE_BACKGROUND",
+        if include_background { "true" } else { "false" },
+    );
     let output = std::process::Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", SCRIPT])
+        .args(["-l", "JavaScript", "-e", &script])
         .output()
         .context("running osascript to query NSWorkspace")?;
 
@@ -42,6 +47,6 @@ rows.join('\n');
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn print_running() -> Result<()> {
+pub fn print_running(_include_background: bool) -> Result<()> {
     bail!("listing running applications is only supported on macOS")
 }

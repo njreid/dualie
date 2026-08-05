@@ -144,7 +144,9 @@ To find bundle IDs for currently running applications:
 capshift apps
 ```
 
-The output is sorted as `name<TAB>bundle-id` for easy copying into `app=` bindings.
+The output includes regular foreground applications and is sorted as
+`name<TAB>bundle-id` for easy copying into `app=` bindings. Use
+`capshift apps --all` to include background agents, helpers, and UI services.
 
 ---
 
